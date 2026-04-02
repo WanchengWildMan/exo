@@ -179,7 +179,8 @@ class DiskEventLog:
             # Prune oldest archives beyond the limit
             archives = sorted(directory.glob("events.*.bin.zst"))
             for old in archives[:-_MAX_ARCHIVES]:
-                old.unlink()
+                with contextlib.suppress(OSError):
+                    old.unlink()
         except Exception as e:
             logger.opt(exception=e).warning(f"Failed to rotate event log {source}")
             # Clean up the source even if compression fails

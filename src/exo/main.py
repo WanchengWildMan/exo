@@ -396,13 +396,13 @@ class Args(CamelCaseModel):
             action="store_true",
             dest="fast_synch",
             default=None,
-            help="Force MLX FAST_SYNCH on (for JACCL backend)",
+            help="Enable MLX FAST_SYNCH on compatible macOS versions (may fail on older systems)",
         )
         fast_synch_group.add_argument(
             "--no-fast-synch",
             action="store_false",
             dest="fast_synch",
-            help="Force MLX FAST_SYNCH off",
+            help="Disable MLX FAST_SYNCH",
         )
 
         args = parser.parse_args()

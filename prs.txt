@@ -1,0 +1,22 @@
+1466	fix: forcefully terminate runner on Shutdown timeout	alexcheema/graceful-loading-shutdown	OPEN	2026-02-12T23:37:28Z
+1289	WIP: local changes made for exo windows support	peterxing:peter/wip	OPEN	2026-01-26T13:54:00Z
+1804	Fix master routing tasks to instances with dead runners	mustafalpyilmaz:fix/master-route-dead-instances	OPEN	2026-03-26T22:22:13Z
+1179	Fix placement pipeline edge case	leo/fix-placement-pipeline-edge-case	CLOSED	2026-01-17T00:51:27Z
+1383	Dashboard: reduce GPU usage from frequent re-renders	jayy-77:fix-dashboard-gpu-usage-1025	OPEN	2026-02-04T22:01:11Z
+1206	Wrap pipeline models for explicit mx.depends between cache and logits	leo/fix-pipeline-gpu-timeout	MERGED	2026-01-19T14:39:30Z
+1429	Address GPU timeouts	leo/address-gpu-timeouts	MERGED	2026-02-09T20:29:12Z
+1620	Address Mac Mini pipeline GPU timeouts	leo/fix-macmini-pipeline	MERGED	2026-02-25T15:01:56Z
+1088	feat: implement bandwidth-aware shard assignment for pipeline parallelism	abendrothj:feat/bandwidth-aware-placement	OPEN	2026-01-03T13:17:14Z
+1801	[Fix] Node hang on reelection	michaelharrigan:mh/fix/await-worker-shutdown-on-reelection	MERGED	2026-03-26T16:21:21Z
+1181	feat: add prefill progress bar for long prompts	alexcheema/prefill-progress	MERGED	2026-01-17T17:13:22Z
+1389	feat: add stop button to dashboard for cancelling requests	alexcheema/dashboard-stop-button	OPEN	2026-02-05T12:58:58Z
+1611	update mlx 2	leo/update-mlx-2	MERGED	2026-02-24T18:06:25Z
+1714	fix: shield macmon cleanup from cancellation to prevent orphaned process	ecohash-co:fix/macmon-orphan-on-election	MERGED	2026-03-12T16:34:30Z
+1498	fix: recover stuck runners and finalize cancel tasks	mustafalpyilmaz:bugfix/cancel-task-stuck-runner	MERGED	2026-02-17T16:53:16Z
+1540	Add cancellation button and the ability to cancel during prefill	leo/add-cancellation-button	MERGED	2026-02-19T00:02:43Z
+1453	Address rdma gpu locks	leo/address-rdma-gpu-locks	CLOSED	2026-02-12T00:00:22Z
+1209	Split NodePerformanceProfile into granular state mappings	split-node-performance-profile	MERGED	2026-01-19T17:36:44Z
+935	[Security] Fix CRITICAL vulnerability: V-001	orbisai0security:fix-v-001-dashboard-src-routes-page.svelte	CLOSED	2025-12-20T08:31:04Z
+791	Intel Arc Support	deftdawg:intel-arc	CLOSED	2025-03-19T06:12:54Z
+139	[Bounty] PyTorch & HuggingFace Interface	risingsunomi:main	CLOSED	2024-08-11T02:24:36Z
+393	Update device_capabilities.py: Add GTX 1070, 1080; main.py: timeout 90->900	FFAMax:main	MERGED	2024-10-28T04:41:59Z

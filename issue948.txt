@@ -1,0 +1,15 @@
+title:	Two M3 Ultra are running the model qwen3-coder-480b-a35b-8bit. An error is thrown when using VS Code Client.
+state:	CLOSED
+author:	wangaocheng
+labels:	
+comments:	17
+assignees:	
+projects:	
+milestone:	
+number:	948
+--
+Hardware: Mac Studio M3 Ultra 512gb x 2
+
+An error is thrown when using VS Code Client, while the normal chat mode works fine.
+
+libc++abi: terminating due to uncaught exception of type std::runtime_error: [METAL] Command buffer execution failed: Caused GPU Timeout Error (00000002:kIOGPUCommandBufferCallbackErrorTimeout)

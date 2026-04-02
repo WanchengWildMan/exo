@@ -162,6 +162,36 @@ class TestFileVerification:
             assert result == local_file
             mock_session_factory.assert_not_called()
 
+    async def test_file_not_found_includes_download_path_context(
+        self, model_id: ModelId, tmp_path: Path
+    ) -> None:
+        """FileNotFoundError should include the concrete target paths and dirs."""
+        from exo.download.download_utils import (
+            _download_file,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        target_dir = tmp_path / "downloads"
+        await aios.makedirs(target_dir, exist_ok=True)
+
+        with patch(
+            "exo.download.download_utils.aios.makedirs",
+            new_callable=AsyncMock,
+            side_effect=FileNotFoundError(2, "No such file or directory", "/missing"),
+        ):
+            with pytest.raises(FileNotFoundError) as error_info:
+                await _download_file(
+                    model_id,
+                    "main",
+                    "nested/model.safetensors",
+                    target_dir,
+                )
+
+        message = str(error_info.value)
+        assert "target_dir=" in message
+        assert "target_path=" in message
+        assert "partial_path=" in message
+        assert str(target_dir) in message
+
 
 class TestFileListCache:
     """Tests for file list caching behavior."""

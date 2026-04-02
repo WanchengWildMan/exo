@@ -1,0 +1,47 @@
+title:	Address Mac Mini pipeline GPU timeouts
+state:	MERGED
+author:	rltakashige
+labels:	
+assignees:	
+reviewers:	Evanev7 (Approved)
+projects:	
+milestone:	
+number:	1620
+url:	https://github.com/exo-explore/exo/pull/1620
+additions:	40
+deletions:	20
+auto-merge:	enabled	rltakashige	squash
+--
+## Motivation
+Users were reporting GPU timeout errors on Mac Minis, which we never saw on testing with Mac Studios. It also seems to only happen with large models.
+
+## Changes
+Eval specific distributed operations.
+
+## Why It Works
+
+As I wrote in a Slack message:
+Basically, prefill is too slow for pipeline communications. If there are both communications and GPU operations as part of an mlx graph, the communications become subject to the GPU's 5 second command buffer timeout.
+
+For normal generation, I added evals to the communications (only during prefill, as it slows down decode) to do this, fixing GPU timeouts.
+
+But we don't do this during warmup, as the prompt is absolutely tiny. This is still too slow on an M4 Pro on some models that it causes a GPU timeout during warmup...
+
+
+----------------------
+This was one of the issues. However, there is another issue:
+
+mx.all_gather sometimes reads stale data with FAST_SYNCH enabled. I'm still investigating the root cause, but the code as it is now works on Mac Minis.
+
+
+
+## Test Plan
+
+### Manual Testing
+<img width="2762" height="1808" alt="image" src="https://github.com/user-attachments/assets/27c88542-606c-4551-8f7c-bd2c0471f54e" />
+
+<img width="2820" height="1898" alt="image" src="https://github.com/user-attachments/assets/0ba3478c-ee39-438d-902c-92893db23d05" />
+
+
+### Automated Testing
+Needs a bunch on mac minis

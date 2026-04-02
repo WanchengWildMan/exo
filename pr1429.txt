@@ -1,0 +1,37 @@
+title:	Address GPU timeouts
+state:	MERGED
+author:	rltakashige
+labels:	
+assignees:	
+reviewers:	JakeHillion (Approved)
+projects:	
+milestone:	
+number:	1429
+url:	https://github.com/exo-explore/exo/pull/1429
+additions:	32
+deletions:	8
+auto-merge:	enabled	rltakashige	squash
+--
+## Motivation
+
+For large prompts and/or slow machines, users are running into GPU timeout errors very often.
+
+## Changes
+
+Only during prefill, we eval distributed operations. We don't do this during decode to maintain decode performance.
+Raise the prefill step size to 8192 because now we can (we see a speedup here).
+We also now see a 2x speedup in pipeline parallel prefill by disabling an unnecessary all_gather during prefill.
+
+## Why It Works
+
+GPU timeout errors happen in the Metal backend when GPU operations take too long without making progress.
+By isolating distributed operations, we can allow them to run without any timeouts.
+
+## Test Plan
+
+### Manual Testing
+Doesn't GPU timeout on 100k tokens on Minimax anymore. Also tested on Kimi.
+
+### Automated Testing
+Needs more exo bench, but I think this is a good step in the right direction.
+

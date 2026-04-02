@@ -401,22 +401,28 @@ class Builder:
         logger.info(
             f"model has_tool_calling={self.tokenizer.has_tool_calling} using tokens {self.tokenizer.tool_call_start}, {self.tokenizer.tool_call_end}"
         )
-        if (
-            self.tokenizer.tool_call_start
-            and self.tokenizer.tool_call_end
-            and self.tokenizer.tool_parser  # type: ignore
-        ):
-            tool_parser = make_mlx_parser(
-                self.tokenizer.tool_call_start,
-                self.tokenizer.tool_call_end,
-                self.tokenizer.tool_parser,  # type: ignore
-            )
+        # BUGFIX: Disable tool_parser compilation for Nix on Metal 4.0 issues
+        try:
+            if (
+                self.tokenizer.tool_call_start
+                and self.tokenizer.tool_call_end
+                and self.tokenizer.tool_parser  # type: ignore
+                and not os.environ.get("EXO_DISABLE_TOOL_CALLING")
+            ):
+                tool_parser = make_mlx_parser(
+                    self.tokenizer.tool_call_start,
+                    self.tokenizer.tool_call_end,
+                    self.tokenizer.tool_parser,  # type: ignore
+                )
+        except Exception as e:
+            logger.warning(f"Failed to initialize tool_parser (Metal JIT error on Nix): {e}")
+            tool_parser = None
 
         kv_prefix_cache = KVPrefixCache(self.group)
 
         device_rank = 0 if self.group is None else self.group.rank()
-        if os.environ.get("EXO_NO_BATCH"):
-            logger.info("using SequentialGenerator (batching disabled)")
+        if os.environ.get("EXO_NO_BATCH") or self.group is not None:
+            logger.info("using SequentialGenerator (batching disabled for pipeline/dist to avoid GPU timeout)")
             return SequentialGenerator(
                 model=self.inference_model,
                 tokenizer=self.tokenizer,

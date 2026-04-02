@@ -27,10 +27,17 @@ def entrypoint(
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 2048), hard), hard))
 
     fast_synch_override = os.environ.get("EXO_FAST_SYNCH")
-    if fast_synch_override != "off":
+    if fast_synch_override == "on":
         os.environ["MLX_METAL_FAST_SYNCH"] = "1"
+        logger.info("Fast synch forced ON")
     else:
         os.environ["MLX_METAL_FAST_SYNCH"] = "0"
+        if fast_synch_override == "off":
+            logger.info("Fast synch forced OFF")
+        else:
+            logger.info(
+                "Fast synch disabled by default; pass --fast-synch to enable it on compatible macOS versions"
+            )
 
     logger.info(f"Fast synch flag: {os.environ['MLX_METAL_FAST_SYNCH']}")
 

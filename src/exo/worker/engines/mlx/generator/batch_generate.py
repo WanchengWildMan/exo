@@ -99,7 +99,7 @@ class ExoBatchGenerator:
         self._mlx_gen = MlxBatchGenerator(
             model=self.model,
             stop_tokens=set(eos_ids_from_tokenizer(self.tokenizer)),
-            prefill_step_size=4096,
+            prefill_step_size=512,
         )
         self._mlx_gen._needs_topk = False  # pyright: ignore[reportAttributeAccessIssue]
 

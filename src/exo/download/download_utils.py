@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import hashlib
 import os
 import shutil
@@ -54,6 +55,42 @@ class HuggingFaceAuthenticationError(Exception):
 
 class HuggingFaceRateLimitError(Exception):
     """429 Huggingface code"""
+
+
+def _download_path_context(
+    model_id: ModelId,
+    revision: str,
+    path: str,
+    target_dir: Path,
+) -> str:
+    target_path = target_dir / path
+    partial_path = target_dir / f"{path}.partial"
+    return (
+        f"{model_id=} {revision=} {path=} "
+        f"target_dir={str(target_dir)!r} "
+        f"target_path={str(target_path)!r} "
+        f"partial_path={str(partial_path)!r} "
+        f"target_dir_exists={target_dir.exists()} "
+        f"target_parent_exists={target_path.parent.exists()} "
+        f"default_models_dir={str(EXO_DEFAULT_MODELS_DIR)!r} "
+        f"writable_model_dirs={[str(directory) for directory in EXO_MODELS_DIRS]!r} "
+        f"read_only_model_dirs={[str(directory) for directory in EXO_MODELS_READ_ONLY_DIRS]!r}"
+    )
+
+
+def _with_download_path_context(
+    error: FileNotFoundError,
+    model_id: ModelId,
+    revision: str,
+    path: str,
+    target_dir: Path,
+) -> FileNotFoundError:
+    detail = str(error) or "No such file or directory"
+    return FileNotFoundError(
+        errno.ENOENT,
+        f"{detail}. Download context: {_download_path_context(model_id, revision, path, target_dir)}",
+        error.filename or str(target_dir / path),
+    )
 
 
 async def _build_auth_error_message(status_code: int, model_id: ModelId) -> str:
@@ -570,85 +607,90 @@ async def _download_file(
     on_progress: Callable[[int, int, bool], None] = lambda _, __, ___: None,
     skip_internet: bool = False,
 ) -> Path:
-    target_path = target_dir / path
+    try:
+        target_path = target_dir / path
 
-    if await aios.path.exists(target_path):
-        if skip_internet:
-            return target_path
-
-        local_size = (await aios.stat(target_path)).st_size
-
-        # Try to verify against remote, but allow offline operation
-        try:
-            remote_size, _ = await file_meta(model_id, revision, path)
-            if local_size != remote_size:
-                logger.info(
-                    f"File {path} size mismatch (local={local_size}, remote={remote_size}), re-downloading"
-                )
-                await aios.remove(target_path)
-            else:
+        if await aios.path.exists(target_path):
+            if skip_internet:
                 return target_path
-        except Exception as e:
-            # Offline or network error - trust local file
-            logger.debug(
-                f"Could not verify {path} against remote (offline?): {e}, using local file"
+
+            local_size = (await aios.stat(target_path)).st_size
+
+            # Try to verify against remote, but allow offline operation
+            try:
+                remote_size, _ = await file_meta(model_id, revision, path)
+                if local_size != remote_size:
+                    logger.info(
+                        f"File {path} size mismatch (local={local_size}, remote={remote_size}), re-downloading"
+                    )
+                    await aios.remove(target_path)
+                else:
+                    return target_path
+            except Exception as e:
+                # Offline or network error - trust local file
+                logger.debug(
+                    f"Could not verify {path} against remote (offline?): {e}, using local file"
+                )
+                return target_path
+
+        if skip_internet:
+            raise FileNotFoundError(
+                f"File {path} not found locally and cannot download in offline mode"
             )
-            return target_path
 
-    if skip_internet:
-        raise FileNotFoundError(
-            f"File {path} not found locally and cannot download in offline mode"
+        await aios.makedirs((target_dir / path).parent, exist_ok=True)
+        length, etag = await file_meta(model_id, revision, path)
+        remote_hash = etag[:-5] if etag.endswith("-gzip") else etag
+        partial_path = target_dir / f"{path}.partial"
+        resume_byte_pos = (
+            (await aios.stat(partial_path)).st_size
+            if (await aios.path.exists(partial_path))
+            else None
         )
+        if resume_byte_pos != length:
+            url = urljoin(f"{get_hf_endpoint()}/{model_id}/resolve/{revision}/", path)
+            headers = await get_download_headers()
+            if resume_byte_pos:
+                headers["Range"] = f"bytes={resume_byte_pos}-"
+            n_read = resume_byte_pos or 0
+            async with (
+                create_http_session(timeout_profile="long") as session,
+                session.get(url, headers=headers) as r,
+            ):
+                if r.status == 404:
+                    raise FileNotFoundError(f"File not found: {url}")
+                if r.status in [401, 403]:
+                    msg = await _build_auth_error_message(r.status, model_id)
+                    raise HuggingFaceAuthenticationError(msg)
+                assert r.status in [200, 206], (
+                    f"Failed to download {path} from {url}: {r.status}"
+                )
+                async with aiofiles.open(
+                    partial_path, "ab" if resume_byte_pos else "wb"
+                ) as f:
+                    while chunk := await r.content.read(8 * 1024 * 1024):
+                        n_read = n_read + (await f.write(chunk))
+                        on_progress(n_read, length, False)
 
-    await aios.makedirs((target_dir / path).parent, exist_ok=True)
-    length, etag = await file_meta(model_id, revision, path)
-    remote_hash = etag[:-5] if etag.endswith("-gzip") else etag
-    partial_path = target_dir / f"{path}.partial"
-    resume_byte_pos = (
-        (await aios.stat(partial_path)).st_size
-        if (await aios.path.exists(partial_path))
-        else None
-    )
-    if resume_byte_pos != length:
-        url = urljoin(f"{get_hf_endpoint()}/{model_id}/resolve/{revision}/", path)
-        headers = await get_download_headers()
-        if resume_byte_pos:
-            headers["Range"] = f"bytes={resume_byte_pos}-"
-        n_read = resume_byte_pos or 0
-        async with (
-            create_http_session(timeout_profile="long") as session,
-            session.get(url, headers=headers) as r,
-        ):
-            if r.status == 404:
-                raise FileNotFoundError(f"File not found: {url}")
-            if r.status in [401, 403]:
-                msg = await _build_auth_error_message(r.status, model_id)
-                raise HuggingFaceAuthenticationError(msg)
-            assert r.status in [200, 206], (
-                f"Failed to download {path} from {url}: {r.status}"
+        final_hash = await calc_hash(
+            partial_path, hash_type="sha256" if len(remote_hash) == 64 else "sha1"
+        )
+        integrity = final_hash == remote_hash
+        if not integrity:
+            try:
+                await aios.remove(partial_path)
+            except Exception as e:
+                logger.error(f"Error removing partial file {partial_path}: {e}")
+            raise Exception(
+                f"Downloaded file {target_dir / path} has hash {final_hash} but remote hash is {remote_hash}"
             )
-            async with aiofiles.open(
-                partial_path, "ab" if resume_byte_pos else "wb"
-            ) as f:
-                while chunk := await r.content.read(8 * 1024 * 1024):
-                    n_read = n_read + (await f.write(chunk))
-                    on_progress(n_read, length, False)
-
-    final_hash = await calc_hash(
-        partial_path, hash_type="sha256" if len(remote_hash) == 64 else "sha1"
-    )
-    integrity = final_hash == remote_hash
-    if not integrity:
-        try:
-            await aios.remove(partial_path)
-        except Exception as e:
-            logger.error(f"Error removing partial file {partial_path}: {e}")
-        raise Exception(
-            f"Downloaded file {target_dir / path} has hash {final_hash} but remote hash is {remote_hash}"
-        )
-    await aios.rename(partial_path, target_dir / path)
-    on_progress(length, length, True)
-    return target_dir / path
+        await aios.rename(partial_path, target_dir / path)
+        on_progress(length, length, True)
+        return target_dir / path
+    except FileNotFoundError as error:
+        raise _with_download_path_context(
+            error, model_id, revision, path, target_dir
+        ) from error
 
 
 def calculate_repo_progress(

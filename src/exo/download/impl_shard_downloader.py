@@ -182,15 +182,20 @@ class ResumableShardDownloader(ShardDownloader):
                 return await _status_for_model(model_card.model_id)
 
         tasks = [
-            create_task(download_with_semaphore(model_card))
+            asyncio.create_task(download_with_semaphore(model_card))
             for model_card in await get_model_cards()
         ]
 
-        for task in asyncio.as_completed(tasks):
-            try:
-                yield await task
-            except Exception as e:
-                logger.warning(f"Error downloading shard: {type(e).__name__}")
+        try:
+            for task in asyncio.as_completed(tasks):
+                try:
+                    yield await task
+                except Exception as e:
+                    logger.warning(f"Error downloading shard: {type(e).__name__}")
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
 
     async def get_shard_download_status_for_shard(
         self, shard: ShardMetadata

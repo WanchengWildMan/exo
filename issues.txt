@@ -1,0 +1,15 @@
+948	CLOSED	Two M3 Ultra are running the model qwen3-coder-480b-a35b-8bit. An error is thrown when using VS Code Client.		2026-01-13T12:54:23Z
+1823	OPEN	Runner SIGKILL cascade leads to 100% CPU spin and unrecoverable cluster state (2-node TB5)		2026-03-31T21:39:28Z
+1418	CLOSED	Dynamic handling of prefill step size for pipeline parallel sharding	enhancement	2026-03-09T12:19:50Z
+1082	OPEN	[BUG] Failure to run on DGX Spark	bug	2026-01-04T07:12:56Z
+732	CLOSED	macos cluster only load memory in first machine		2025-12-18T17:57:40Z
+603	CLOSED	One node can see the other, but not reciprocal		2025-12-18T16:15:24Z
+563	CLOSED	The results obtained using Mali GPU and OpenCL inference are meaningless		2025-12-19T05:49:41Z
+197	CLOSED	More robust networking		2025-12-18T19:29:05Z
+148	CLOSED	[BOUNTY - $500] Add support for quantized models with tinygrad	enhancement	2025-12-18T14:44:34Z
+387	CLOSED	LLVM=1 exo can't run on linux/ubuntu with CPU only		2025-12-18T16:32:32Z
+274	CLOSED	Host not healthy.		2025-12-18T19:31:16Z
+458	CLOSED	clang issues on ubuntu 24.04 and Python 3.12		2025-12-18T18:41:10Z
+572	CLOSED	ubuntu RISC-V run error		2025-12-18T19:10:28Z
+241	CLOSED	we need option to use intel graphics like (intel iris xe)		2025-12-18T18:44:17Z
+155	CLOSED	Having trouble running on ubuntu linux with 4090 (cuda 12.2)		2025-12-18T17:52:59Z

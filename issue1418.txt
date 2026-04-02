@@ -1,0 +1,15 @@
+title:	Dynamic handling of prefill step size for pipeline parallel sharding
+state:	CLOSED
+author:	rltakashige
+labels:	enhancement
+comments:	0
+assignees:	
+projects:	
+milestone:	
+number:	1418
+--
+We get GPU timeout errors for computation that takes too long.
+
+While the issue title suggests that we should change prefill step size depending on model, we could also try to fix this upstream by not timing out so aggressively. 
+
+We should also try narrowing down when this occurs.

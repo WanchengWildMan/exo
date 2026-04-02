@@ -374,8 +374,76 @@ def _find_ip_prioritised(
             "unknown": 2,
             "maybe_ethernet": 3,
             "thunderbolt": 4,
-        }
+    }
     return min(ips, key=lambda ip: priority.get(ip_to_type.get(ip, "unknown"), 2))
+
+
+def _jaccl_ip_priority(
+    ip: str,
+    node_network: Mapping[NodeId, NodeNetworkInfo],
+    coordinator: NodeId,
+) -> tuple[int, int, str]:
+    coordinator_network = node_network.get(coordinator, NodeNetworkInfo())
+    ip_to_type = {
+        iface.ip_address: iface.interface_type
+        for iface in coordinator_network.interfaces
+    }
+    priority = {
+        "ethernet": 0,
+        "wifi": 1,
+        "unknown": 2,
+        "maybe_ethernet": 3,
+        "thunderbolt": 4,
+    }
+    return (
+        priority.get(ip_to_type.get(ip, "unknown"), 2),
+        1 if ":" in ip else 0,
+        ip,
+    )
+
+
+def _find_common_jaccl_coordinator_ip(
+    coordinator: NodeId,
+    cycle_digraph: Topology,
+    node_network: Mapping[NodeId, NodeNetworkInfo],
+) -> str:
+    candidate_ips: set[str] | None = None
+
+    for node_id in cycle_digraph.list_nodes():
+        if node_id == coordinator:
+            continue
+
+        ips = set(_find_connection_ip(node_id, coordinator, cycle_digraph))
+        if not ips:
+            raise ValueError(
+                "Current jaccl backend requires all participating devices to be able to communicate"
+            )
+
+        candidate_ips = ips if candidate_ips is None else candidate_ips & ips
+
+    if candidate_ips is None:
+        coordinator_network = node_network.get(coordinator, NodeNetworkInfo())
+        if not coordinator_network.interfaces:
+            raise ValueError(
+                "Current jaccl backend requires the coordinator node to advertise at least one network interface"
+            )
+        coordinator_ips = {
+            iface.ip_address for iface in coordinator_network.interfaces
+        }
+        return min(
+            coordinator_ips,
+            key=lambda ip: _jaccl_ip_priority(ip, node_network, coordinator),
+        )
+
+    if not candidate_ips:
+        raise ValueError(
+            "Current jaccl backend requires a single coordinator IP reachable from all participating devices"
+        )
+
+    return min(
+        candidate_ips,
+        key=lambda ip: _jaccl_ip_priority(ip, node_network, coordinator),
+    )
 
 
 def get_mlx_ring_hosts_by_node(
@@ -441,21 +509,10 @@ def get_mlx_jaccl_coordinators(
     """
     logger.debug(f"Selecting coordinator: {coordinator}")
 
-    def get_ip_for_node(n: NodeId) -> str:
-        if n == coordinator:
-            return "0.0.0.0"
-
-        ip = _find_ip_prioritised(
-            n, coordinator, cycle_digraph, node_network, ring=False
-        )
-        if ip is not None:
-            return ip
-
-        raise ValueError(
-            "Current jaccl backend requires all participating devices to be able to communicate"
-        )
-
+    coordinator_ip = _find_common_jaccl_coordinator_ip(
+        coordinator, cycle_digraph, node_network
+    )
     return {
-        n: f"{get_ip_for_node(n)}:{coordinator_port}"
+        n: f"{coordinator_ip}:{coordinator_port}"
         for n in cycle_digraph.list_nodes()
     }

@@ -1,6 +1,7 @@
 import contextlib
 import functools
 import math
+import os
 import time
 from copy import deepcopy
 from typing import Callable, Generator, cast, get_args
@@ -263,7 +264,7 @@ def prefill(
     def progress_callback(processed: int, total: int) -> None:
         elapsed = time.perf_counter() - start_time
         tok_per_sec = processed / elapsed if elapsed > 0 else 0
-        logger.debug(
+        logger.info(
             f"Prefill progress: {processed}/{total} tokens ({tok_per_sec:.1f} tok/s)"
         )
         if has_ssm:
@@ -284,10 +285,12 @@ def prefill(
 
     is_pipeline = _has_pipeline_communication_layer(model)
 
-    prefill_step_size = 4096
+    prefill_step_size = 512
+    logger.info(f"Prefill config: is_pipeline={is_pipeline}, num_tokens={num_tokens}, prefill_step_size={prefill_step_size}")
 
     try:
-        if is_pipeline and num_tokens >= prefill_step_size:
+        if is_pipeline:
+            logger.info("Using pipeline_parallel_prefill logic...")
             set_pipeline_queue_sends(model, queue_sends=True)
             assert group is not None, "Pipeline prefill requires a distributed group"
             pipeline_parallel_prefill(
@@ -302,6 +305,7 @@ def prefill(
                 group=group,
             )
         else:
+            logger.info("Using stream_generate logic for prefill...")
             # Use max_tokens=1 because max_tokens=0 does not work.
             # We just throw away the generated token - we only care about filling the cache
             for _ in stream_generate(
@@ -354,6 +358,12 @@ def warmup_inference(
     model_id: ModelId,
 ) -> int:
     logger.info(f"warming up inference for instance: {model_id}")
+
+    if os.environ.get("EXO_SKIP_WARMUP", "1") != "0":
+        logger.info(
+            "Skipping warmup inference; set EXO_SKIP_WARMUP=0 to re-enable it"
+        )
+        return 50
 
     content = "Prompt to warm up the inference engine. Repeat this."
 

@@ -16,6 +16,7 @@ from exo.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from exo.shared.topology import Topology
 from exo.shared.types.common import NodeId
 from exo.shared.types.memory import Memory
+from exo.shared.types.multiaddr import Multiaddr
 from exo.shared.types.profiling import (
     NetworkInterfaceInfo,
     NodeNetworkInfo,
@@ -283,12 +284,18 @@ def test_get_mlx_jaccl_coordinators():
     node_b_id = NodeId()
     node_c_id = NodeId()
 
+    shared_coordinator_ip = "169.254.0.2"
+
     # fully connected (directed) between the 3 nodes
     conn_a_b = Connection(
         source=node_a_id, sink=node_b_id, edge=create_socket_connection(1)
     )
     conn_b_a = Connection(
-        source=node_b_id, sink=node_a_id, edge=create_socket_connection(2)
+        source=node_b_id,
+        sink=node_a_id,
+        edge=SocketConnection(
+            sink_multiaddr=Multiaddr(address=f"/ip4/{shared_coordinator_ip}/tcp/1234")
+        ),
     )
     conn_b_c = Connection(
         source=node_b_id, sink=node_c_id, edge=create_socket_connection(3)
@@ -297,7 +304,11 @@ def test_get_mlx_jaccl_coordinators():
         source=node_c_id, sink=node_b_id, edge=create_socket_connection(4)
     )
     conn_c_a = Connection(
-        source=node_c_id, sink=node_a_id, edge=create_socket_connection(5)
+        source=node_c_id,
+        sink=node_a_id,
+        edge=SocketConnection(
+            sink_multiaddr=Multiaddr(address=f"/ip4/{shared_coordinator_ip}/tcp/1234")
+        ),
     )
     conn_a_c = Connection(
         source=node_a_id, sink=node_c_id, edge=create_socket_connection(6)
@@ -306,7 +317,7 @@ def test_get_mlx_jaccl_coordinators():
     network_a = NodeNetworkInfo(
         interfaces=[
             NetworkInterfaceInfo(name="en0", ip_address="169.254.0.5"),
-            NetworkInterfaceInfo(name="en0", ip_address="169.254.0.2"),
+            NetworkInterfaceInfo(name="en0", ip_address=shared_coordinator_ip),
         ]
     )
     network_b = NodeNetworkInfo(
@@ -349,39 +360,75 @@ def test_get_mlx_jaccl_coordinators():
 
     # assert
     assert len(coordinators) == 3
-    assert node_a_id in coordinators
-    assert node_b_id in coordinators
-    assert node_c_id in coordinators
+    assert coordinators == {
+        node_a_id: f"{shared_coordinator_ip}:5000",
+        node_b_id: f"{shared_coordinator_ip}:5000",
+        node_c_id: f"{shared_coordinator_ip}:5000",
+    }
 
-    # All coordinators should have IP:PORT format
-    for node_id, coordinator in coordinators.items():
-        assert ":" in coordinator, (
-            f"Coordinator for {node_id} should have ':' separator"
-        )
 
-    # Verify port is correct
-    for node_id, coordinator in coordinators.items():
-        assert coordinator.endswith(":5000"), (
-            f"Coordinator for {node_id} should use port 5000"
-        )
+def test_get_mlx_jaccl_coordinators_requires_common_reachable_ip():
+    # arrange
+    node_a_id = NodeId()
+    node_b_id = NodeId()
+    node_c_id = NodeId()
 
-    # Rank 0 (node_a) treats this as the listen socket so should listen on all IPs
-    assert coordinators[node_a_id].startswith("0.0.0.0:"), (
-        "Rank 0 node should use 0.0.0.0 as coordinator listen address"
+    topology = Topology()
+    topology.add_node(node_a_id)
+    topology.add_node(node_b_id)
+    topology.add_node(node_c_id)
+
+    topology.add_connection(
+        Connection(source=node_a_id, sink=node_b_id, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b_id, sink=node_a_id, edge=create_socket_connection(2))
+    )
+    topology.add_connection(
+        Connection(source=node_b_id, sink=node_c_id, edge=create_socket_connection(3))
+    )
+    topology.add_connection(
+        Connection(source=node_c_id, sink=node_b_id, edge=create_socket_connection(4))
+    )
+    topology.add_connection(
+        Connection(source=node_c_id, sink=node_a_id, edge=create_socket_connection(5))
+    )
+    topology.add_connection(
+        Connection(source=node_a_id, sink=node_c_id, edge=create_socket_connection(6))
     )
 
-    # Non-rank-0 nodes should use the specific IP from their connection to rank 0
-    # node_b uses the IP from conn_b_a (node_b -> node_a)
-    assert isinstance(conn_b_a.edge, SocketConnection)
-    assert (
-        coordinators[node_b_id] == f"{conn_b_a.edge.sink_multiaddr.ip_address}:5000"
-    ), "node_b should use the IP from conn_b_a"
+    node_network = {
+        node_a_id: NodeNetworkInfo(
+            interfaces=[
+                NetworkInterfaceInfo(name="en0", ip_address="169.254.0.5"),
+                NetworkInterfaceInfo(name="en0", ip_address="169.254.0.2"),
+            ]
+        ),
+        node_b_id: NodeNetworkInfo(
+            interfaces=[
+                NetworkInterfaceInfo(name="en0", ip_address="169.254.0.1"),
+                NetworkInterfaceInfo(name="en0", ip_address="169.254.0.4"),
+            ]
+        ),
+        node_c_id: NodeNetworkInfo(
+            interfaces=[
+                NetworkInterfaceInfo(name="en0", ip_address="169.254.0.3"),
+                NetworkInterfaceInfo(name="en0", ip_address="169.254.0.6"),
+            ]
+        ),
+    }
 
-    # node_c uses the IP from conn_c_a (node_c -> node_a)
-    assert isinstance(conn_c_a.edge, SocketConnection)
-    assert coordinators[node_c_id] == (
-        f"{conn_c_a.edge.sink_multiaddr.ip_address}:5000"
-    ), "node_c should use the IP from conn_c_a"
+    # act / assert
+    with pytest.raises(
+        ValueError,
+        match="single coordinator IP reachable from all participating devices",
+    ):
+        get_mlx_jaccl_coordinators(
+            node_a_id,
+            coordinator_port=5000,
+            cycle_digraph=topology,
+            node_network=node_network,
+        )
 
 
 class TestAllocateLayersProportionally:

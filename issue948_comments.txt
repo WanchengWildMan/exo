@@ -1,0 +1,120 @@
+author:	Evanev7
+association:	member
+edited:	false
+status:	none
+--
+Sounds like the other machine crashed - could be a particularly large prompt if its only happening during agentic workflows. Any more info?
+--
+author:	rltakashige
+association:	collaborator
+edited:	false
+status:	none
+--
+I've also seen this issue when running DeepSeek V3.1 in pipeline parallel (it does not happen in tensor parallel). Have not encountered this in Qwen Coder, but do want to get to the bottom of this.
+--
+author:	wangaocheng
+association:	none
+edited:	true
+status:	none
+--
+@Evanev7 
+
+No additional information was available. After the error occurred, the model was unloaded from the memory of both Macs. Qwen3 Coder runs smoothly on LM Studio via the Cline plugin for VS Code. Since the prompt is very long, it seems that LM Studio splits the prompt into two segments before performing inference.
+
+--
+author:	Evanev7
+association:	member
+edited:	false
+status:	none
+--
+ok - i'll assume this is an issue with chunking large prompts for now
+--
+author:	wangaocheng
+association:	none
+edited:	false
+status:	none
+--
+> ok - i'll assume this is an issue with chunking large prompts for now
+
+can you fix the issue?
+--
+author:	Evanev7
+association:	member
+edited:	false
+status:	none
+--
+In theory yes, might take a bit.
+--
+author:	wangaocheng
+association:	none
+edited:	false
+status:	none
+--
+> 理论上是的，可能需要一些时间。
+
+Thank you
+--
+author:	bogeyinto2
+association:	none
+edited:	false
+status:	none
+--
+I am having the same error on 2x M4 Mac minis over thunderbolt bridge using MLX Ring and Pipeline with Qwen 3 30B 4 Bit. Both are M4 16GB machines.
+--
+author:	wangaocheng
+association:	none
+edited:	false
+status:	none
+--
+> Could you please tell me how to connect four Macs? What are the rules for wiring? Are there any tutorials
+简单来说就是每台MAC用到两根雷电线。A - > B(B的雷电口一个连接A，一个连接C) ，以此类推，最后D的雷电口一个连接C，一个连接A
+--
+author:	VoidMore
+association:	none
+edited:	false
+status:	none
+--
+> > Could you please tell me how to connect four Macs? What are the rules for wiring? Are there any tutorials
+> > 简单来说就是每台MAC用到两根雷电线。A - > B(B的雷电口一个连接A，一个连接C) ，以此类推，最后D的雷电口一个连接C，一个连接A
+
+　No, it still can't be automatically recognized.
+--
+author:	wangaocheng
+association:	none
+edited:	false
+status:	none
+--
+> In theory yes, might take a bit.
+
+have you fixed the issue?
+--
+author:	Evanev7
+association:	member
+edited:	false
+status:	none
+--
+Still working on distributed testing here - we don't have a repro at the moment. I assume you're still running into this problem?
+--
+author:	wangaocheng
+association:	none
+edited:	false
+status:	none
+--
+> Still working on distributed testing here - we don't have a repro at the moment. I assume you're still running into this problem?
+
+Yes, I am still running into this problem
+--
+author:	wangaocheng
+association:	none
+edited:	false
+status:	none
+--
+thanks , I installed 1.0.62, the issue fixed. very nice. thanks again!
+--
+author:	Evanev7
+association:	member
+edited:	false
+status:	none
+--
+nice!
+--

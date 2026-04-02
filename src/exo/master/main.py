@@ -367,6 +367,7 @@ class Master:
                             ):
                                 await self._send_event(IndexedEvent(idx=i, event=event))
                     for event in generated_events:
+                        logger.info(f"Master broadcasting event to cluster: {type(event).__name__}")
                         await self.event_sender.send(event)
                 except ValueError as e:
                     logger.opt(exception=e).warning("Error in command processor")

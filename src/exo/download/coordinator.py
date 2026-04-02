@@ -15,7 +15,11 @@ from exo.download.download_utils import (
     resolve_existing_model,
 )
 from exo.download.shard_downloader import ShardDownloader
-from exo.shared.constants import EXO_DEFAULT_MODELS_DIR, EXO_MODELS_READ_ONLY_DIRS
+from exo.shared.constants import (
+    EXO_DEFAULT_MODELS_DIR,
+    EXO_MODELS_DIRS,
+    EXO_MODELS_READ_ONLY_DIRS,
+)
 from exo.shared.models.model_cards import ModelId, get_model_cards
 from exo.shared.types.commands import (
     CancelDownload,
@@ -265,11 +269,17 @@ class DownloadCoordinator:
                 with cancel_scope:
                     await self.shard_downloader.ensure_shard(shard)
             except Exception as e:
-                logger.error(f"Download failed for {model_id}: {e}")
+                logger.opt(exception=True).error(
+                    "Download failed for {}. default_model_dir={} writable_model_dirs={} read_only_model_dirs={}",
+                    model_id,
+                    self._default_model_dir(model_id),
+                    [str(directory) for directory in EXO_MODELS_DIRS],
+                    [str(directory) for directory in EXO_MODELS_READ_ONLY_DIRS],
+                )
                 failed = DownloadFailed(
                     shard_metadata=shard,
                     node_id=self.node_id,
-                    error_message=str(e),
+                    error_message=f"{type(e).__name__}: {e}",
                     model_directory=self._default_model_dir(model_id),
                 )
                 self.download_status[model_id] = failed

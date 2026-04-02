@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import os
 
 import anyio
 from loguru import logger
@@ -63,6 +64,7 @@ from exo.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
 from exo.shared.types.worker.instances import InstanceId
+from exo.shared.types.worker.runners import RunnerReady, RunnerRunning
 from exo.utils.channels import Receiver, Sender
 from exo.utils.disk_event_log import DiskEventLog
 from exo.utils.event_buffer import MultiSourceBuffer
@@ -128,11 +130,39 @@ class Master:
                         case TestCommand():
                             pass
                         case TextGeneration():
+                            require_ready_instance = os.getenv(
+                                "EXO_REQUIRE_READY_INSTANCE", ""
+                            ).lower() in {"1", "true", "yes", "on"}
                             for instance in self.state.instances.values():
                                 if (
                                     instance.shard_assignments.model_id
                                     == command.task_params.model
                                 ):
+                                    if require_ready_instance:
+                                        runner_ids = (
+                                            instance.shard_assignments.runner_to_shard.keys()
+                                        )
+                                        runner_statuses = {
+                                            str(runner_id): type(
+                                                self.state.runners.get(runner_id, None)
+                                            ).__name__
+                                            for runner_id in runner_ids
+                                        }
+                                        is_ready = all(
+                                            isinstance(
+                                                self.state.runners.get(runner_id, None),
+                                                (RunnerReady, RunnerRunning),
+                                            )
+                                            for runner_id in runner_ids
+                                        )
+                                        if not is_ready:
+                                            logger.info(
+                                                "Skipping non-ready instance "
+                                                f"{instance.instance_id} for model {command.task_params.model}: "
+                                                f"runner_statuses={runner_statuses}"
+                                            )
+                                            continue
+
                                     task_count = sum(
                                         1
                                         for task in self.state.tasks.values()
@@ -143,6 +173,10 @@ class Master:
                                     )
 
                             if not instance_task_counts:
+                                if require_ready_instance:
+                                    raise ValueError(
+                                        f"No ready instance found for model {command.task_params.model}"
+                                    )
                                 raise ValueError(
                                     f"No instance found for model {command.task_params.model}"
                                 )
@@ -154,6 +188,23 @@ class Master:
                                 ],
                             )
 
+                            selected_instance_id = available_instance_ids[0]
+                            selected_instance = self.state.instances[
+                                selected_instance_id
+                            ]
+                            selected_runner_statuses = {
+                                str(runner_id): type(
+                                    self.state.runners.get(runner_id, None)
+                                ).__name__
+                                for runner_id in selected_instance.shard_assignments.runner_to_shard
+                            }
+                            logger.info(
+                                "Creating TextGeneration task for "
+                                f"instance {selected_instance_id}: "
+                                f"runner_statuses={selected_runner_statuses}, "
+                                f"require_ready_instance={require_ready_instance}"
+                            )
+
                             task_id = TaskId()
                             generated_events.append(
                                 TaskCreated(
@@ -161,7 +212,7 @@ class Master:
                                     task=TextGenerationTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
-                                        instance_id=available_instance_ids[0],
+                                        instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
                                     ),

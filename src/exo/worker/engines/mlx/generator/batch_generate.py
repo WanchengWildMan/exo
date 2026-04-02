@@ -139,7 +139,7 @@ class ExoBatchGenerator:
                     task_params=task_params,
                 )
             except Exception:
-                logger.opt(exception=True).warning(
+                logger.opt(exception=True).warning(  # pyright: ignore[reportUnknownMemberType]
                     "Vision processing failed, falling back to text-only"
                 )
 

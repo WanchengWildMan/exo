@@ -285,7 +285,7 @@ def prefill(
 
     is_pipeline = _has_pipeline_communication_layer(model)
 
-    prefill_step_size = 512
+    prefill_step_size = int(os.getenv("EXO_PREFILL_STEP_SIZE", 64))
     logger.info(f"Prefill config: is_pipeline={is_pipeline}, num_tokens={num_tokens}, prefill_step_size={prefill_step_size}")
 
     try:

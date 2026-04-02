@@ -46,7 +46,7 @@ stdenvNoCC.mkDerivation {
   '';
 
   # Metal language version for CMake (from: echo __METAL_VERSION__ | metal -E -x metal -P -)
-  passthru.metalVersion = "310";
+  passthru.metalVersion = "400";
 
   meta = {
     description = "Apple Metal compiler toolchain";

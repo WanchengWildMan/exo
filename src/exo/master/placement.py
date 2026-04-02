@@ -1,3 +1,4 @@
+import os
 import random
 from collections.abc import Mapping
 from copy import deepcopy
@@ -111,6 +112,15 @@ def place_instance(
     required_nodes: set[NodeId] | None = None,
     download_status: Mapping[NodeId, Sequence[DownloadProgress]] | None = None,
 ) -> dict[InstanceId, Instance]:
+    disable_jaccl = os.getenv("EXO_DISABLE_JACCL", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if command.instance_meta == InstanceMeta.MlxJaccl and disable_jaccl:
+        command.instance_meta = InstanceMeta.MlxRing
+
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
 

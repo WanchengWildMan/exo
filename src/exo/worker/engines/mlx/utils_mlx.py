@@ -131,21 +131,45 @@ def mlx_distributed_init(
                 assert all(
                     jaccl_devices[i][i] is None for i in range(len(jaccl_devices))
                 )
-                # Use RDMA connectivity matrix
+                # Keep diagonal entries as JSON null; JACCL expects optional device entries.
                 jaccl_devices_json = json.dumps(jaccl_devices)
 
                 with open(coordination_file, "w") as f:
                     _ = f.write(jaccl_devices_json)
 
                 jaccl_coordinator = jaccl_coordinators[bound_instance.bound_node_id]
+                # Defensively normalize values before exporting env vars for JACCL init.
+                normalized_coordinator = re.sub(
+                    r"\s+", "", str(jaccl_coordinator).strip().strip('"').strip("'")
+                )
+                if not re.fullmatch(r"[^:]+:\d+", normalized_coordinator):
+                    raise ValueError(
+                        f"Invalid JACCL coordinator endpoint: {jaccl_coordinator!r} -> {normalized_coordinator!r}"
+                    )
+                normalized_rank = str(rank).strip()
+                normalized_coordination_file = str(coordination_file).strip()
 
                 logger.info(
                     f"rank {rank} MLX_IBV_DEVICES: {coordination_file} with devices: {jaccl_devices_json}"
                 )
-                logger.info(f"rank {rank} MLX_JACCL_COORDINATOR: {jaccl_coordinator}")
-                os.environ["MLX_IBV_DEVICES"] = coordination_file
-                os.environ["MLX_RANK"] = str(rank)
-                os.environ["MLX_JACCL_COORDINATOR"] = jaccl_coordinator
+                logger.info(
+                    f"rank {rank} MLX_JACCL_COORDINATOR: {normalized_coordinator}"
+                )
+                logger.info(
+                    "JACCL env values (repr): "
+                    f"MLX_RANK={normalized_rank!r}, "
+                    f"MLX_IBV_DEVICES={normalized_coordination_file!r}, "
+                    f"MLX_JACCL_COORDINATOR={normalized_coordinator!r}"
+                )
+                if not mx.distributed.is_available(backend="jaccl"):
+                    raise RuntimeError(
+                        "[jaccl] Backend unavailable on this node. "
+                        "MLX JACCL requires ibverbs/RDMA runtime support. "
+                        "Use MlxRing placement or install/enable RDMA stack on all nodes."
+                    )
+                os.environ["MLX_IBV_DEVICES"] = normalized_coordination_file
+                os.environ["MLX_RANK"] = normalized_rank
+                os.environ["MLX_JACCL_COORDINATOR"] = normalized_coordinator
                 group = mx.distributed.init(backend="jaccl", strict=True)
 
         logger.info(f"Rank {rank} mlx distributed initialization complete")

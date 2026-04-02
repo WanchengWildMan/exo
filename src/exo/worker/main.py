@@ -356,7 +356,8 @@ class Worker:
         await self._stopped.wait()
 
     async def _start_runner_task(self, task: Task):
-        logger.info(f"Worker {self.node_id} received Task: {task.task_id} (Command: {task.command_id})")
+        cmd_id = getattr(task, "command_id", "N/A")
+        logger.info(f"Worker {self.node_id} received Task: {task.task_id} (Command: {cmd_id})")
         if (instance := self.state.instances.get(task.instance_id)) is not None:
             await self.runners[
                 instance.shard_assignments.node_to_runner[self.node_id]

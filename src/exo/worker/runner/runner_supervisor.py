@@ -24,6 +24,8 @@ from exo.shared.types.tasks import (
     CANCEL_ALL_TASKS,
     ImageEdits,
     ImageGeneration,
+    LoadModel,
+    StartWarmup,
     Task,
     TaskId,
     TaskStatus,
@@ -35,6 +37,8 @@ from exo.shared.types.worker.runners import (
     RunnerFailed,
     RunnerIdle,
     RunnerLoading,
+    RunnerLoaded,
+    RunnerReady,
     RunnerRunning,
     RunnerShuttingDown,
     RunnerStatus,
@@ -211,11 +215,36 @@ class RunnerSupervisor:
                                 RunnerRunning,
                                 RunnerWarmingUp,
                                 RunnerLoading,
+                                RunnerLoaded,
                                 RunnerConnecting,
                                 RunnerShuttingDown,
                             ),
                         )
-                        self.in_progress.pop(event.task_id, None)
+                        completed_task = self.in_progress.pop(event.task_id, None)
+                        if isinstance(completed_task, LoadModel) and isinstance(
+                            self.status, RunnerLoading
+                        ):
+                            # If the runner sent TaskStatus.Complete before RunnerLoaded,
+                            # synthesize RunnerLoaded to avoid planner stalls.
+                            self.status = RunnerLoaded()
+                            await self._event_sender.send(
+                                RunnerStatusUpdated(
+                                    runner_id=self.bound_instance.bound_runner_id,
+                                    runner_status=self.status,
+                                )
+                            )
+                        if isinstance(completed_task, StartWarmup) and isinstance(
+                            self.status, RunnerWarmingUp
+                        ):
+                            # If RunnerReady is delayed/lost after warmup completion,
+                            # synthesize it so pending text tasks can be forwarded.
+                            self.status = RunnerReady()
+                            await self._event_sender.send(
+                                RunnerStatusUpdated(
+                                    runner_id=self.bound_instance.bound_runner_id,
+                                    runner_status=self.status,
+                                )
+                            )
                         self.completed.add(event.task_id)
                     await self._event_sender.send(event)
         except (ClosedResourceError, BrokenResourceError) as e:

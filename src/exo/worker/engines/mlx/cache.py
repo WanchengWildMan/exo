@@ -16,6 +16,7 @@ from mlx_lm.tokenizer_utils import TokenizerWrapper
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
 from exo.worker.engines.mlx.constants import CACHE_GROUP_SIZE, KEEP_KV_SIZE, KV_CACHE_BITS, MAX_KV_SIZE
+from exo.worker.engines.mlx.ssd_kv_cache import SSD_CACHE_ENABLED, SSDKVStore
 from exo.worker.runner.bootstrap import logger
 
 if TYPE_CHECKING:
@@ -88,6 +89,12 @@ class KVPrefixCache:
         self._last_used: list[int] = []  # monotonic counter of last access per entry
         self._access_counter: int = 0
         self._group = group
+        self._ssd: SSDKVStore | None = None
+        if SSD_CACHE_ENABLED:
+            try:
+                self._ssd = SSDKVStore()
+            except Exception:
+                logger.opt(exception=True).debug("SSD KV cache disabled (init failed)")
 
     def clear(self):
         """Clear all cached prompts and caches."""
@@ -201,6 +208,20 @@ class KVPrefixCache:
                 best_index, best_length = i, length
 
         if best_index is None:
+            # RAM miss → try SSD
+            if self._ssd is not None:
+                ssd_match = self._ssd.find_match(prompt_tokens)
+                if ssd_match is not None:
+                    ssd_idx, ssd_len = ssd_match
+                    if 0 < ssd_len < max_length:
+                        loaded = self._ssd.load(ssd_idx)
+                        if loaded is not None:
+                            self._ssd.remove(ssd_idx)
+                            logger.info(
+                                f"SSD cache hit: {ssd_len} tokens restored, "
+                                f"{max_length - ssd_len} remaining"
+                            )
+                            return loaded, prompt_tokens[ssd_len:], None
             return make_kv_cache(model, max_kv_size=MAX_KV_SIZE, keep=KEEP_KV_SIZE), prompt_tokens, None
 
         # For exact match: trim to max_length-1 so remaining has the last token
@@ -273,6 +294,9 @@ class KVPrefixCache:
         ):
             lru_index = self._last_used.index(min(self._last_used))
             evicted_tokens = len(self.prompts[lru_index])
+            # Save to SSD before evicting from RAM
+            if self._ssd is not None:
+                self._ssd.save(self.prompts[lru_index], self.caches[lru_index])
             self.prompts.pop(lru_index)
             self.caches.pop(lru_index)
             self._snapshots.pop(lru_index)

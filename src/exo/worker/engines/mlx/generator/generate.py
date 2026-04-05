@@ -26,7 +26,11 @@ from exo.api.types import (
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
-from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from exo.shared.types.text_generation import (
+    InputMessage,
+    TextGenerationTaskParams,
+    resolve_max_output_tokens,
+)
 from exo.shared.types.worker.runner_response import (
     GenerationResponse,
 )
@@ -48,9 +52,12 @@ from exo.worker.engines.mlx.cache import (
 )
 from exo.worker.engines.mlx.constants import (
     DEFAULT_TOP_LOGPROBS,
+    KEEP_KV_SIZE,
     KV_BITS,
     KV_GROUP_SIZE,
+    MAX_KV_SIZE,
     MAX_TOKENS,
+    THINKING_CONTENT_TOKEN_RESERVE,
 )
 from exo.worker.engines.mlx.utils_mlx import (
     apply_chat_template,
@@ -106,6 +113,117 @@ def patch_embed_tokens(
 
 class PrefillCancelled(BaseException):
     """Raised when prefill is cancelled via the progress callback."""
+
+
+class PrefillOOM(BaseException):
+    """Raised when memory usage exceeds threshold during prefill."""
+
+
+_PREFILL_MEMORY_CHECK_INTERVAL: int = int(os.getenv("EXO_PREFILL_MEMORY_CHECK_INTERVAL", "8"))
+# Maximum Metal GPU memory (in GB) above which prefill is aborted.
+# Uses mx.get_active_memory() which tracks actual Metal allocations — more accurate
+# than psutil.virtual_memory() on Apple Silicon (which includes OS caches, etc.).
+# Default: total system RAM minus 1.5GB reserve (auto-calculated at first check).
+_PREFILL_MAX_METAL_GB: float = float(os.getenv("EXO_PREFILL_MAX_METAL_GB", "0"))
+# Fallback: minimum available system RAM (in GB) below which prefill is aborted.
+# Only used when mx.get_active_memory() is unavailable.
+_PREFILL_MIN_AVAILABLE_GB: float = float(os.getenv("EXO_PREFILL_MIN_AVAILABLE_GB", "0.5"))
+# Interval (in steps) between forced mx.eval() calls during prefill to flush the
+# MLX computation graph and free intermediate activation memory.  Without this the
+# graph accumulates over all chunks and causes OOM long before the KV cache itself
+# becomes a problem. Default: every 8 steps.
+_PREFILL_EVAL_INTERVAL: int = int(os.getenv("EXO_PREFILL_EVAL_INTERVAL", "8"))
+
+
+def _get_metal_memory_limit_gb() -> float:
+    """Get Metal memory limit in GB (auto-calculated if not set)."""
+    if _PREFILL_MAX_METAL_GB > 0:
+        return _PREFILL_MAX_METAL_GB
+    # Auto: total system RAM minus 1.5GB reserve for OS + other apps
+    import psutil
+    total_gb = psutil.virtual_memory().total / (1024 ** 3)
+    return total_gb - 1.5
+
+
+def _check_memory_during_prefill(step: int, processed: int, total: int) -> None:
+    """Log memory usage during prefill and abort if Metal memory exceeds limit.
+
+    Uses mx.get_active_memory() which tracks actual Metal GPU allocations on
+    Apple Silicon — more accurate than psutil.virtual_memory() which includes
+    OS file caches and other non-Metal memory. (Learned from oMLX #429.)
+    """
+    if step % _PREFILL_MEMORY_CHECK_INTERVAL != 0:
+        return
+    active_bytes = mx.get_active_memory()
+    active_gb = active_bytes / (1024 ** 3)
+    limit_gb = _get_metal_memory_limit_gb()
+    logger.info(
+        f"[Prefill memory] step={step} tokens={processed}/{total} "
+        f"metal_active={active_gb:.2f}GB metal_limit={limit_gb:.2f}GB"
+    )
+    if active_gb > limit_gb:
+        logger.error(
+            f"Metal active memory {active_gb:.2f}GB exceeds limit {limit_gb:.2f}GB "
+            f"during prefill at token {processed}/{total}. Aborting to prevent OOM."
+        )
+        raise PrefillOOM(
+            f"Metal memory {active_gb:.2f}GB exceeds {limit_gb:.2f}GB "
+            f"at prefill token {processed}/{total}"
+        )
+
+
+def _maybe_eval_cache(cache: KVCacheType, step: int) -> None:
+    """Periodically force-evaluate the KV cache to flush the MLX computation graph.
+
+    Without this, MLX accumulates the entire prefill as a lazy graph (~56 MB of
+    attention activations per step × N steps) which dwarfs the actual KV cache
+    memory and causes OOM.
+    """
+    if step > 0 and step % _PREFILL_EVAL_INTERVAL == 0:
+        mx.eval([c.state for c in cache])
+
+
+class PrefillSyncTimeout(BaseException):
+    """Raised when a distributed sync during prefill exceeds the timeout."""
+
+
+_PREFILL_SYNC_TIMEOUT: float = float(os.getenv("EXO_PREFILL_SYNC_TIMEOUT", "60"))
+
+
+def _run_prefill_sync(
+    callback: Callable[[], None] | None,
+    *,
+    rank: int,
+    phase: str,
+) -> None:
+    if callback is None:
+        return
+
+    logger.info(f"[R{rank}] Waiting for distributed prefill sync: {phase}")
+    started_at = time.perf_counter()
+
+    if _PREFILL_SYNC_TIMEOUT <= 0:
+        callback()
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(callback)
+            try:
+                future.result(timeout=_PREFILL_SYNC_TIMEOUT)
+            except FuturesTimeoutError:
+                elapsed_s = time.perf_counter() - started_at
+                msg = (
+                    f"[R{rank}] Distributed prefill sync timed out after {elapsed_s:.1f}s "
+                    f"during {phase}. The other rank likely crashed or lost connection."
+                )
+                logger.error(msg)
+                raise PrefillSyncTimeout(msg) from None
+
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    logger.info(
+        f"[R{rank}] Distributed prefill sync complete: {phase} ({elapsed_ms:.1f}ms)"
+    )
 
 
 def _has_pipeline_communication_layer(model: Model):
@@ -186,9 +304,12 @@ def pipeline_parallel_prefill(
 
     try:
         with mx.stream(generation_stream):
-            for _ in range(n_leading):
-                if distributed_prompt_progress_callback is not None:
-                    distributed_prompt_progress_callback()
+            for leading_index in range(n_leading):
+                _run_prefill_sync(
+                    distributed_prompt_progress_callback,
+                    rank=rank,
+                    phase=f"leading_dummy {leading_index + 1}/{n_leading}",
+                )
 
             for i in range(n_real):
                 chunk_size = real_chunk_sizes[i]
@@ -199,16 +320,29 @@ def pipeline_parallel_prefill(
                 quantize_cache_fn(_prompt_cache)
                 processed += chunk_size
 
-                if distributed_prompt_progress_callback is not None:
-                    distributed_prompt_progress_callback()
+                _run_prefill_sync(
+                    distributed_prompt_progress_callback,
+                    rank=rank,
+                    phase=f"real_chunk {i + 1}/{n_real}",
+                )
 
                 flush_prefill_sends()
 
-                prompt_progress_callback(processed, total)
+                # Periodically force-evaluate the KV cache to flush the lazy
+                # computation graph.  Without this, MLX accumulates all prefill
+                # steps as a single graph whose intermediate activations dwarf
+                # the actual KV cache and cause OOM on memory-constrained nodes.
+                _maybe_eval_cache(_prompt_cache, i)
 
-            for _ in range(n_trailing):
-                if distributed_prompt_progress_callback is not None:
-                    distributed_prompt_progress_callback()
+                prompt_progress_callback(processed, total)
+                _check_memory_during_prefill(i, processed, total)
+
+            for trailing_index in range(n_trailing):
+                _run_prefill_sync(
+                    distributed_prompt_progress_callback,
+                    rank=rank,
+                    phase=f"trailing_dummy {trailing_index + 1}/{n_trailing}",
+                )
 
     finally:
         clear_prefill_sends()
@@ -233,6 +367,47 @@ def pipeline_parallel_prefill(
     )
 
 
+def _estimate_prefill_peak_bytes(model: Model, num_tokens: int, prefill_step_size: int) -> int:
+    """Estimate peak memory for a single prefill chunk.
+
+    Considers SDPA implementation details (learned from oMLX MemoryMonitor):
+    - head_dim > 128: MLX SDPA fallback materializes full attention matrix
+      [B, num_heads, chunk, kv_len] in float32 — very large peak.
+    - head_dim <= 128: MLX fused SDPA kernel uses tiled computation with
+      much lower peak memory (only output buffer + small working set).
+
+    Returns estimated peak bytes, or 0 if model config is unavailable.
+    """
+    config: object | None = getattr(model, "args", None) or getattr(model, "config", None)
+    if config is None:
+        return 0
+    num_layers: int = int(getattr(config, "num_hidden_layers", 0) or getattr(config, "n_layer", 0) or 0)
+    num_kv_heads: int = int(getattr(config, "num_key_value_heads", 0) or getattr(config, "num_attention_heads", 0) or 0)
+    num_heads: int = int(getattr(config, "num_attention_heads", 0) or num_kv_heads or 0)
+    head_dim: int = int(getattr(config, "head_dim", 0) or 0)
+    hidden_size: int = int(getattr(config, "hidden_size", 0) or getattr(config, "n_embd", 0) or 0)
+    if head_dim == 0 and hidden_size > 0 and num_heads > 0:
+        head_dim = hidden_size // num_heads
+    if num_layers == 0 or num_kv_heads == 0 or head_dim == 0:
+        return 0
+
+    chunk_size: int = min(prefill_step_size, num_tokens)
+    # KV cache growth for one chunk: 2 (K+V) × layers × kv_heads × head_dim × dtype(2) × chunk_tokens
+    kv_per_chunk: int = 2 * num_layers * num_kv_heads * head_dim * 2 * chunk_size
+
+    # SDPA peak depends on head_dim
+    sdpa_peak: int
+    if head_dim > 128:
+        # Fallback: full attention matrix [B=1, num_heads, chunk, total_kv_len] in float32
+        # total_kv_len ≈ num_tokens (worst case: last chunk sees all previous tokens)
+        sdpa_peak = 1 * num_heads * chunk_size * num_tokens * 4  # float32
+    else:
+        # Fused kernel: output buffer [B=1, num_heads, chunk, head_dim] in dtype(2) + small overhead
+        sdpa_peak = 1 * num_heads * chunk_size * head_dim * 2 * 2  # 2x for working set
+
+    return kv_per_chunk + sdpa_peak
+
+
 def prefill(
     model: Model,
     tokenizer: TokenizerWrapper,
@@ -255,10 +430,39 @@ def prefill(
     if num_tokens == 0:
         return 0.0, 0, []
 
+    # Pre-flight memory check: estimate peak memory and reject if it would exceed limit.
+    prefill_step_size = int(os.getenv("EXO_PREFILL_STEP_SIZE", 64))
+    peak_bytes = _estimate_prefill_peak_bytes(model, num_tokens, prefill_step_size)
+    if peak_bytes > 0:
+        current_bytes = mx.get_active_memory()
+        limit_gb = _get_metal_memory_limit_gb()
+        limit_bytes = int(limit_gb * 1024 ** 3)
+        projected = current_bytes + peak_bytes
+        if projected > limit_bytes:
+            projected_gb = projected / (1024 ** 3)
+            current_gb = current_bytes / (1024 ** 3)
+            peak_gb = peak_bytes / (1024 ** 3)
+            logger.error(
+                f"Prefill pre-flight check failed: projected peak {projected_gb:.2f}GB "
+                f"(current {current_gb:.2f}GB + estimate {peak_gb:.2f}GB) "
+                f"exceeds limit {limit_gb:.2f}GB for {num_tokens} tokens"
+            )
+            raise PrefillOOM(
+                f"Prefill would peak at {projected_gb:.2f}GB (limit {limit_gb:.2f}GB) "
+                f"for {num_tokens} tokens"
+            )
+        else:
+            logger.info(
+                f"Prefill pre-flight: {num_tokens} tokens, estimated peak "
+                f"{projected / (1024**3):.2f}GB / {limit_gb:.2f}GB OK"
+            )
+
     logger.debug(f"Prefilling {num_tokens} tokens...")
     start_time = time.perf_counter()
     has_ssm = has_non_kv_caches(cache)
     snapshots: list[CacheSnapshot] = []
+
+    _prefill_step_counter = [0]
 
     # TODO(evan): kill the callbacks/runner refactor
     def progress_callback(processed: int, total: int) -> None:
@@ -267,6 +471,8 @@ def prefill(
         logger.info(
             f"Prefill progress: {processed}/{total} tokens ({tok_per_sec:.1f} tok/s)"
         )
+        _check_memory_during_prefill(_prefill_step_counter[0], processed, total)
+        _prefill_step_counter[0] += 1
         if has_ssm:
             snapshots.append(snapshot_ssm_states(cache))
 
@@ -322,6 +528,14 @@ def prefill(
             ):
                 break  # Stop after first iteration - cache is now filled
     except PrefillCancelled:
+        set_pipeline_queue_sends(model, queue_sends=False)
+        set_pipeline_prefill(model, is_prefill=False)
+        raise
+    except PrefillOOM:
+        set_pipeline_queue_sends(model, queue_sends=False)
+        set_pipeline_prefill(model, is_prefill=False)
+        raise
+    except PrefillSyncTimeout:
         set_pipeline_queue_sends(model, queue_sends=False)
         set_pipeline_prefill(model, is_prefill=False)
         raise
@@ -540,7 +754,7 @@ def mlx_generate(
     prefix_hit_length = 0
     matched_index: int | None = None
     if kv_prefix_cache is None:
-        caches = make_kv_cache(model=model)
+        caches = make_kv_cache(model=model, max_kv_size=MAX_KV_SIZE, keep=KEEP_KV_SIZE)
         prompt_tokens = all_prompt_tokens
     else:
         caches, prompt_tokens, matched_index = kv_prefix_cache.get_kv_cache(
@@ -601,7 +815,12 @@ def mlx_generate(
     # stream_generate starts from the last token
     last_token = prompt_tokens[-2:]
 
-    max_tokens = task.max_output_tokens or MAX_TOKENS
+    max_tokens = resolve_max_output_tokens(
+        max_output_tokens=task.max_output_tokens,
+        enable_thinking=task.enable_thinking,
+        default_max_tokens=MAX_TOKENS,
+        thinking_content_token_reserve=THINKING_CONTENT_TOKEN_RESERVE,
+    )
     accumulated_text = ""
     generated_text_parts: list[str] = []
     generation_start_time = time.perf_counter()

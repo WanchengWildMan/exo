@@ -252,6 +252,7 @@ class Runner:
         self.acknowledge_task(task)
         if isinstance(self.generator, InferenceGenerator):
             self.generator.close()
+        mx.synchronize()
         mx.clear_cache()
         import gc
 
@@ -318,6 +319,10 @@ class Runner:
             except WouldBlock:
                 pass
 
+        mx.synchronize()
+        mx.clear_cache()
+        import gc
+        gc.collect()
         self.update_status(RunnerReady())
         logger.info("runner ready")
 

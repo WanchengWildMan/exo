@@ -235,6 +235,7 @@ def load_mlx_items(
 
     set_wired_limit_for_model(get_weights_size(bound_instance.bound_shard))
 
+    mx.synchronize()
     mx.clear_cache()
 
     vision_config = bound_instance.bound_shard.model_card.vision
@@ -782,6 +783,7 @@ def mlx_cleanup(
     model: Model | None, tokenizer: TokenizerWrapper | None, group: Group | None
 ) -> None:
     del model, tokenizer, group
+    mx.synchronize()
     mx.clear_cache()
     import gc
 

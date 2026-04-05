@@ -1,4 +1,6 @@
 import contextlib
+import gc
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, cast
@@ -7,6 +9,19 @@ import mlx.core as mx
 from mlx_lm.generate import (
     BatchGenerator as MlxBatchGenerator,
 )
+
+
+def _sync_and_clear_cache() -> None:
+    """Synchronize in-flight GPU work before clearing the Metal buffer cache.
+
+    Without synchronization, mx.clear_cache() can release Metal buffers that
+    are still referenced by in-flight command buffers, causing
+    'completeMemory() prepare count underflow' kernel panics on M4 hardware.
+
+    Reference: oMLX issue #300, #435.
+    """
+    mx.synchronize()
+    mx.clear_cache()
 from mlx_lm.generate import (
     generation_stream,
 )
@@ -24,7 +39,10 @@ from exo.api.types import (
 )
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
-from exo.shared.types.text_generation import TextGenerationTaskParams
+from exo.shared.types.text_generation import (
+    TextGenerationTaskParams,
+    resolve_max_output_tokens,
+)
 from exo.shared.types.worker.runner_response import GenerationResponse
 from exo.worker.engines.mlx.cache import (
     CacheSnapshot,
@@ -32,7 +50,13 @@ from exo.worker.engines.mlx.cache import (
     encode_prompt,
     make_kv_cache,
 )
-from exo.worker.engines.mlx.constants import DEFAULT_TOP_LOGPROBS, MAX_TOKENS
+from exo.worker.engines.mlx.constants import (
+    DEFAULT_TOP_LOGPROBS,
+    KEEP_KV_SIZE,
+    MAX_KV_SIZE,
+    MAX_TOKENS,
+    THINKING_CONTENT_TOKEN_RESERVE,
+)
 from exo.worker.engines.mlx.generator.generate import (
     ban_token_ids,
     eos_ids_from_tokenizer,
@@ -94,6 +118,10 @@ class ExoBatchGenerator:
 
     _mlx_gen: MlxBatchGenerator = field(init=False)
     _active_tasks: dict[int, _EngineTask] = field(default_factory=dict, init=False)
+    # Deferred Metal cache clear: wait N steps after last task completes
+    # to give IOKit time to process completeMemory() callbacks (oMLX #435).
+    _DEFERRED_CLEAR_DELAY: int = 8
+    _deferred_clear_steps: int | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self._mlx_gen = MlxBatchGenerator(
@@ -109,6 +137,7 @@ class ExoBatchGenerator:
             bool(self._active_tasks)
             or bool(self._mlx_gen.unprocessed_prompts)
             or self._mlx_gen.active_batch is not None
+            or self._deferred_clear_steps is not None
         )
 
     def submit(
@@ -139,7 +168,7 @@ class ExoBatchGenerator:
                     task_params=task_params,
                 )
             except Exception:
-                logger.opt(exception=True).warning(  # pyright: ignore[reportUnknownMemberType]
+                logger.opt(exception=True).warning(
                     "Vision processing failed, falling back to text-only"
                 )
 
@@ -148,6 +177,12 @@ class ExoBatchGenerator:
             media_regions = vision.media_regions
 
         is_bench = task_params.bench
+
+        # Release stale MLX Metal memory and evict old KV caches before prefill.
+        _sync_and_clear_cache()
+        gc.collect()
+        if self.kv_prefix_cache is not None:
+            self.kv_prefix_cache._evict_if_needed()
 
         prefix_hit_length = 0
         matched_index: int | None = None
@@ -165,9 +200,9 @@ class ExoBatchGenerator:
                 )
                 prompt_tokens = remaining_tokens
             else:
-                cache = make_kv_cache(self.model)
+                cache = make_kv_cache(self.model, max_kv_size=MAX_KV_SIZE, keep=KEEP_KV_SIZE)
         else:
-            cache = make_kv_cache(self.model)
+            cache = make_kv_cache(self.model, max_kv_size=MAX_KV_SIZE, keep=KEEP_KV_SIZE)
 
         seed = task_params.seed if task_params.seed is not None else 42
         mx.random.seed(seed)
@@ -240,7 +275,12 @@ class ExoBatchGenerator:
             eos_ids = eos_ids_from_tokenizer(self.tokenizer)
             logits_processors = [ban_token_ids(eos_ids)] + logits_processors
 
-        max_tokens = task_params.max_output_tokens or MAX_TOKENS
+        max_tokens = resolve_max_output_tokens(
+            max_output_tokens=task_params.max_output_tokens,
+            enable_thinking=task_params.enable_thinking,
+            default_max_tokens=MAX_TOKENS,
+            thinking_content_token_reserve=THINKING_CONTENT_TOKEN_RESERVE,
+        )
 
         uids = self._mlx_gen.insert(
             prompts=[last_tokens.tolist()],
@@ -271,9 +311,23 @@ class ExoBatchGenerator:
 
         return uid
 
+    # Generation-time memory monitoring interval (every N steps).
+    _GENERATION_MEMORY_CHECK_INTERVAL: int = int(os.getenv("EXO_GENERATION_MEMORY_CHECK_INTERVAL", "64"))
+    _generation_step_counter: int = 0
+
     def step(self) -> list[tuple[int, GenerationResponse]]:
         if not self.has_work:
             return []
+
+        # Periodic Metal memory check during generation.
+        self._generation_step_counter += 1
+        if (
+            self._active_tasks
+            and self._GENERATION_MEMORY_CHECK_INTERVAL > 0
+            and self._generation_step_counter % self._GENERATION_MEMORY_CHECK_INTERVAL == 0
+        ):
+            active_gb = mx.get_active_memory() / (1024 ** 3)
+            logger.debug(f"[Generation memory] step={self._generation_step_counter} metal_active={active_gb:.2f}GB")
 
         self._mlx_gen._needs_topk = any(  # pyright: ignore[reportAttributeAccessIssue]
             t.task_params.logprobs for t in self._active_tasks.values()
@@ -415,6 +469,20 @@ class ExoBatchGenerator:
             logger.debug(
                 f"step overhead: {_overhead * 1000:.2f}ms (next={_next_elapsed * 1000:.2f}ms total={_step_elapsed * 1000:.2f}ms)"
             )
+
+        # Release MLX Metal memory when all tasks are done.
+        # Deferred: schedule clear instead of doing it immediately to give IOKit
+        # time to process completeMemory() callbacks (prevents M4 kernel panics).
+        if not self._active_tasks:
+            if self._deferred_clear_steps is None:
+                self._deferred_clear_steps = 0
+            self._deferred_clear_steps += 1
+            if self._deferred_clear_steps >= self._DEFERRED_CLEAR_DELAY:
+                _sync_and_clear_cache()
+                gc.collect()
+                self._deferred_clear_steps = None
+        else:
+            self._deferred_clear_steps = None
 
         return results
 

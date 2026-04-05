@@ -15,7 +15,7 @@ from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
-from exo.worker.engines.mlx.constants import CACHE_GROUP_SIZE, KV_CACHE_BITS
+from exo.worker.engines.mlx.constants import CACHE_GROUP_SIZE, KEEP_KV_SIZE, KV_CACHE_BITS, MAX_KV_SIZE
 from exo.worker.runner.bootstrap import logger
 
 if TYPE_CHECKING:
@@ -201,7 +201,7 @@ class KVPrefixCache:
                 best_index, best_length = i, length
 
         if best_index is None:
-            return make_kv_cache(model), prompt_tokens, None
+            return make_kv_cache(model, max_kv_size=MAX_KV_SIZE, keep=KEEP_KV_SIZE), prompt_tokens, None
 
         # For exact match: trim to max_length-1 so remaining has the last token
         # For partial match: trim to best_length, remaining has suffix to prefill
@@ -212,7 +212,7 @@ class KVPrefixCache:
 
         # No usable snapshot — need fresh cache
         if restore_snap is None and has_ssm:
-            return make_kv_cache(model), prompt_tokens, None
+            return make_kv_cache(model, max_kv_size=MAX_KV_SIZE, keep=KEEP_KV_SIZE), prompt_tokens, None
 
         prompt_cache = deepcopy(self.caches[best_index])
         cached_length = cache_length(self.caches[best_index])
@@ -358,9 +358,20 @@ def get_available_memory() -> Memory:
 
 
 def get_memory_used_percentage() -> float:
-    mem = psutil.virtual_memory()
-    # percent is 0-100
-    return float(mem.percent / 100)
+    """Get memory pressure as a fraction [0, 1].
+
+    Prefers mx.get_active_memory() (Metal GPU allocations) over
+    psutil.virtual_memory().percent when available, since it directly
+    tracks what MLX cares about on Apple Silicon unified memory.
+    Falls back to psutil for non-Metal environments.
+    """
+    try:
+        active = mx.get_active_memory()
+        total = psutil.virtual_memory().total
+        return active / total
+    except Exception:
+        mem = psutil.virtual_memory()
+        return float(mem.percent / 100)
 
 
 def make_kv_cache(
@@ -368,20 +379,43 @@ def make_kv_cache(
 ) -> KVCacheType:
     assert hasattr(model, "layers")
 
+    # model.make_cache() MUST take priority: models like Qwen3.5 use GatedDeltaNet
+    # layers whose cache format is not a simple KVCache/RotatingKVCache and is NOT
+    # subscriptable.  Bypassing model.make_cache() for those models causes a
+    # TypeError: 'RotatingKVCache' object is not subscriptable.
     if hasattr(model, "make_cache"):
-        logger.info("Using MLX LM's make cache")
-        return model.make_cache()  # type: ignore
-
-    if max_kv_size is None:
-        if KV_CACHE_BITS is None:
-            logger.info("Using default KV cache")
-            return [KVCache() for _ in model.layers]
+        cache: KVCacheType = model.make_cache()  # type: ignore
+        # Post-process: bound any plain KVCache entries returned by the model.
+        # Qwen3.5's make_cache() returns unbounded KVCache() for full-attention
+        # layers while returning ArraysCache for GatedDeltaNet layers.  Without
+        # this, MAX_KV_SIZE has no effect on hybrid models.
+        if max_kv_size is not None:
+            replaced = 0
+            for i, c in enumerate(cache):
+                if type(c) is KVCache:
+                    cache[i] = RotatingKVCache(max_size=max_kv_size, keep=keep)  # type: ignore
+                    replaced += 1
+            if replaced:
+                logger.info(
+                    f"Using MLX LM's make cache, replaced {replaced} unbounded "
+                    f"KVCache entries with RotatingKVCache({max_kv_size=}, {keep=})"
+                )
+            else:
+                logger.info("Using MLX LM's make cache (no unbounded KVCache entries)")
         else:
-            logger.info("Using quantized KV cache")
-            return [
-                QuantizedKVCache(group_size=CACHE_GROUP_SIZE, bits=KV_CACHE_BITS)
-                for _ in model.layers
-            ]
-    else:
+            logger.info("Using MLX LM's make cache")
+        return cache
+
+    if max_kv_size is not None:
         logger.info(f"Using rotating KV cache with {max_kv_size=} with {keep=}")
         return [RotatingKVCache(max_size=max_kv_size, keep=keep) for _ in model.layers]
+
+    if KV_CACHE_BITS is None:
+        logger.info("Using default KV cache")
+        return [KVCache() for _ in model.layers]
+    else:
+        logger.info("Using quantized KV cache")
+        return [
+            QuantizedKVCache(group_size=CACHE_GROUP_SIZE, bits=KV_CACHE_BITS)
+            for _ in model.layers
+        ]

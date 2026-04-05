@@ -155,6 +155,7 @@ def _fast_next(self: BatchGenerator) -> list[BatchGenerator.Response]:
 
     self._next_count += 1
     if self._next_count % 512 == 0:
+        mx.synchronize()
         mx.clear_cache()
     self._stats.generation_tokens += len(responses)
     return responses

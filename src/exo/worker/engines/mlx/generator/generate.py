@@ -178,9 +178,20 @@ def _maybe_eval_cache(cache: KVCacheType, step: int) -> None:
     Without this, MLX accumulates the entire prefill as a lazy graph (~56 MB of
     attention activations per step × N steps) which dwarfs the actual KV cache
     memory and causes OOM.
+
+    After evaluating, clears MLX's internal memory cache to free transient
+    intermediate tensors (attention matrices, MLP activations, etc.) that became
+    "dead" after eval.  Without this, dead tensors from previous chunks accumulate
+    on Metal and consume memory that's no longer needed.  (Key insight from oMLX:
+    _sync_and_clear_cache() after each prefill chunk.)
     """
     if step > 0 and step % _PREFILL_EVAL_INTERVAL == 0:
         mx.eval([c.state for c in cache])
+        # Free dead intermediate tensors from previous chunks.
+        # synchronize() is required before clear_cache() to prevent
+        # M4 kernel panics (oMLX #300, #435).
+        mx.synchronize()
+        mx.clear_cache()
 
 
 class PrefillSyncTimeout(BaseException):
@@ -472,6 +483,14 @@ def prefill(
             f"Prefill progress: {processed}/{total} tokens ({tok_per_sec:.1f} tok/s)"
         )
         _check_memory_during_prefill(_prefill_step_counter[0], processed, total)
+        # Clear dead intermediate tensors between prefill chunks to prevent
+        # accumulation of transient activations (attention matrices, MLP outputs).
+        # This is the key difference that allows oMLX to handle large prefills
+        # on memory-constrained devices.  (oMLX scheduler._sync_and_clear_cache)
+        if _prefill_step_counter[0] > 0 and _prefill_step_counter[0] % _PREFILL_EVAL_INTERVAL == 0:
+            mx.eval([c.state for c in cache])
+            mx.synchronize()
+            mx.clear_cache()
         _prefill_step_counter[0] += 1
         if has_ssm:
             snapshots.append(snapshot_ssm_states(cache))

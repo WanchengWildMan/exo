@@ -132,7 +132,7 @@ _PREFILL_MIN_AVAILABLE_GB: float = float(os.getenv("EXO_PREFILL_MIN_AVAILABLE_GB
 # MLX computation graph and free intermediate activation memory.  Without this the
 # graph accumulates over all chunks and causes OOM long before the KV cache itself
 # becomes a problem. Default: every 8 steps.
-_PREFILL_EVAL_INTERVAL: int = int(os.getenv("EXO_PREFILL_EVAL_INTERVAL", "8"))
+_PREFILL_EVAL_INTERVAL: int = int(os.getenv("EXO_PREFILL_EVAL_INTERVAL", "1"))
 
 
 def _get_metal_memory_limit_gb() -> float:
@@ -184,6 +184,10 @@ def _maybe_eval_cache(cache: KVCacheType, step: int) -> None:
     "dead" after eval.  Without this, dead tensors from previous chunks accumulate
     on Metal and consume memory that's no longer needed.  (Key insight from oMLX:
     _sync_and_clear_cache() after each prefill chunk.)
+
+    Called every chunk (eval_interval=1 enforced) to aggressively reclaim memory.
+    On 16GB devices, even 2 chunks of accumulated transients (~100-400 MB) can
+    push Metal over the OOM threshold.
     """
     if step > 0 and step % _PREFILL_EVAL_INTERVAL == 0:
         mx.eval([c.state for c in cache])
@@ -191,7 +195,12 @@ def _maybe_eval_cache(cache: KVCacheType, step: int) -> None:
         # synchronize() is required before clear_cache() to prevent
         # M4 kernel panics (oMLX #300, #435).
         mx.synchronize()
+        before = mx.get_active_memory()
         mx.clear_cache()
+        after = mx.get_active_memory()
+        freed_mb = (before - after) / 1048576
+        if freed_mb > 1:
+            logger.debug(f"[Prefill clear] step={step} freed={freed_mb:.0f}MB")
 
 
 class PrefillSyncTimeout(BaseException):

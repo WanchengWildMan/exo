@@ -62,6 +62,14 @@
 EXO_DISABLE_JACCL=1 EXO_REQUIRE_READY_INSTANCE=1 EXO_FAST_SYNCH=on EXO_PREFILL_STEP_SIZE=1 uv run exo -v
 ```
 
+若模型放置阶段提示内存不足（例如 `No cycles found with sufficient memory`），可临时加：
+
+```bash
+EXO_SKIP_PLACEMENT_MEMORY_CHECK=1
+```
+
+说明：该开关会跳过 placement 的内存 fit 校验，只建议在你明确知道模型可通过系统 swap/压缩内存运行时使用。
+
 ## 验证标准
 
 满足以下日志链路即视为修复成功：
@@ -72,7 +80,42 @@ EXO_DISABLE_JACCL=1 EXO_REQUIRE_READY_INSTANCE=1 EXO_FAST_SYNCH=on EXO_PREFILL_S
 4. `Master broadcasting event to cluster: TaskCreated`
 5. worker 进入 `runner running` 且出现 token/chunk 输出
 
+## Dashboard Ready 与可执行 Ready 的区别
+
+- Dashboard 上看到的 Ready，可能是实例/节点层面的展示状态。
+- 任务真正可执行的 Ready，要求该实例涉及的所有 runner 同步进入可执行状态。
+- 常见卡点是混态：一个 runner `RunnerLoaded`，另一个 `RunnerReady`。
+  这会导致看起来 ready，但 TextGeneration 不会真正开始执行。
+
+建议优先用 `/state` 中的 runner 真实状态判断，而不是仅看 dashboard 标签。
+
 ## 备注
 
 - 该修复优先保证 M2/M4 混合集群稳定运行。
 - 若后续恢复 RDMA，可关闭 `EXO_DISABLE_JACCL` 逐步回归 JACCL 路径。
+
+## 新增：启动期 Event Log `Errno 5` I/O 错误修复
+
+### 现象
+
+- EXO 在启动初始化阶段直接退出。
+- Traceback 落在 `DiskEventLog` 构造时访问 `~/.exo/event_log/api/events.bin`。
+- 报错：`OSError: [Errno 5] Input/output error`。
+
+### 根因
+
+- 该问题属于文件系统/设备层面的瞬时或局部异常（常见于路径状态抖动、介质异常、挂载变化后文件句柄状态异常），不是模型调度逻辑错误。
+- 原逻辑在创建事件日志时只使用单一路径，遇到 `OSError` 会直接中断进程启动。
+
+### 修复
+
+文件：`src/exo/utils/disk_event_log.py`
+
+- 新增目录准备阶段的 `OSError` 兜底。
+- 当目标目录不可用时，自动回退到临时目录：`/tmp/exo/event_log/<component>/<pid>`。
+- 打印 warning，保留可观测性，但不阻断 EXO 启动。
+
+### 验证
+
+- 单测：`uv run pytest src/exo/utils/tests/test_event_log.py` 通过。
+- 本地 smoke test：直接构造 `DiskEventLog(Path.home()/".exo"/"event_log"/"api")` 可正常初始化与关闭。

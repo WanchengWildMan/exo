@@ -64,7 +64,13 @@ from exo.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
 from exo.shared.types.worker.instances import InstanceId
-from exo.shared.types.worker.runners import RunnerReady, RunnerRunning
+from exo.shared.types.worker.runners import (
+    RunnerLoaded,
+    RunnerLoading,
+    RunnerReady,
+    RunnerRunning,
+    RunnerWarmingUp,
+)
 from exo.utils.channels import Receiver, Sender
 from exo.utils.disk_event_log import DiskEventLog
 from exo.utils.event_buffer import MultiSourceBuffer
@@ -148,14 +154,20 @@ class Master:
                                             ).__name__
                                             for runner_id in runner_ids
                                         }
-                                        is_ready = all(
+                                        is_assignable = all(
                                             isinstance(
                                                 self.state.runners.get(runner_id, None),
-                                                (RunnerReady, RunnerRunning),
+                                                (
+                                                    RunnerLoading,
+                                                    RunnerLoaded,
+                                                    RunnerWarmingUp,
+                                                    RunnerReady,
+                                                    RunnerRunning,
+                                                ),
                                             )
                                             for runner_id in runner_ids
                                         )
-                                        if not is_ready:
+                                        if not is_assignable:
                                             logger.info(
                                                 "Skipping non-ready instance "
                                                 f"{instance.instance_id} for model {command.task_params.model}: "

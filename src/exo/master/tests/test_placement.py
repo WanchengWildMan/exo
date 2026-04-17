@@ -244,6 +244,32 @@ def test_get_instance_placements_one_node_not_fit() -> None:
         place_instance(cic, topology, {}, node_memory, node_network)
 
 
+def test_get_instance_placements_one_node_not_fit_with_memory_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    topology = Topology()
+    node_id = NodeId()
+    topology.add_node(node_id)
+    node_memory = {node_id: create_node_memory(1000 * 1024)}
+    node_network = {node_id: create_node_network()}
+    cic = place_instance_command(
+        model_card=ModelCard(
+            model_id=ModelId("test-model"),
+            storage_size=Memory.from_kb(1001),
+            n_layers=10,
+            hidden_size=1000,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+        ),
+    )
+
+    monkeypatch.setenv("EXO_SKIP_PLACEMENT_MEMORY_CHECK", "1")
+
+    placements = place_instance(cic, topology, {}, node_memory, node_network)
+
+    assert len(placements) == 1
+
+
 def test_get_transition_events_no_change(instance: Instance):
     # arrange
     instance_id = InstanceId()

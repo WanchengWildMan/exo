@@ -1,5 +1,7 @@
 import contextlib
 import json
+import os
+import tempfile
 from collections import OrderedDict
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -71,16 +73,45 @@ class DiskEventLog:
 
     def __init__(self, directory: Path) -> None:
         self._directory = directory
-        self._directory.mkdir(parents=True, exist_ok=True)
         self._active_path = directory / "events.bin"
         self._offset_cache: OrderedDict[int, int] = OrderedDict()
         self._count: int = 0
 
-        # Rotate stale active file from a previous session/crash
-        if self._active_path.exists():
-            self._rotate(self._active_path, self._directory)
+        self._prepare_directory_or_fallback(directory)
 
         self._file: BufferedRandom = open(self._active_path, "w+b")  # noqa: SIM115
+
+    def _prepare_directory_or_fallback(self, requested_directory: Path) -> None:
+        try:
+            self._prepare_directory(requested_directory)
+            self._directory = requested_directory
+            self._active_path = requested_directory / "events.bin"
+            return
+        except OSError as error:
+            fallback_directory = self._fallback_directory(requested_directory)
+            logger.warning(
+                "Event log path unavailable ({}): {}. Falling back to {}",
+                requested_directory,
+                error,
+                fallback_directory,
+            )
+
+        self._prepare_directory(fallback_directory)
+        self._directory = fallback_directory
+        self._active_path = fallback_directory / "events.bin"
+
+    def _prepare_directory(self, directory: Path) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        active_path = directory / "events.bin"
+        # Rotate stale active file from a previous session/crash
+        if active_path.exists():
+            self._rotate(active_path, directory)
+
+    @staticmethod
+    def _fallback_directory(requested_directory: Path) -> Path:
+        temp_root = Path(tempfile.gettempdir()) / "exo" / "event_log"
+        component = requested_directory.name or "default"
+        return temp_root / component / str(os.getpid())
 
     def _cache_offset(self, idx: int, offset: int) -> None:
         self._offset_cache[idx] = offset

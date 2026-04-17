@@ -112,6 +112,18 @@ def place_instance(
     required_nodes: set[NodeId] | None = None,
     download_status: Mapping[NodeId, Sequence[DownloadProgress]] | None = None,
 ) -> dict[InstanceId, Instance]:
+    use_total_memory_for_placement = os.getenv(
+        "EXO_USE_TOTAL_MEMORY_FOR_PLACEMENT", "1"
+    ).lower() not in {"0", "false", "no", "off"}
+
+    def _placement_memory_for_node(node_id: NodeId) -> Memory:
+        memory_usage = node_memory[node_id]
+        return (
+            memory_usage.ram_total
+            if use_total_memory_for_placement
+            else memory_usage.ram_available
+        )
+
     disable_jaccl = os.getenv("EXO_DISABLE_JACCL", "").lower() in {
         "1",
         "true",
@@ -195,7 +207,7 @@ def place_instance(
                 cycle, command.model_card.model_id, resolved_download_status
             ),
             sum(
-                (node_memory[node_id].ram_available for node_id in cycle),
+                (_placement_memory_for_node(node_id) for node_id in cycle),
                 start=Memory(),
             ),
         ),

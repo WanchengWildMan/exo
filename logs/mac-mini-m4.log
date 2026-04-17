@@ -1,0 +1,54 @@
+warning: The `extra-build-dependencies` option is experimental and may change without warning. Pass `--preview-features extra-build-dependencies` to disable this warning.
+[ 11:18:57.4270PM | [1mINFO    [0m] [1m========================================[0m
+[ 11:18:57.4275PM | [1mINFO    [0m] [1mStarting EXO | pid=48358[0m
+[ 11:18:57.4276PM | [1mINFO    [0m] [1m========================================[0m
+[ 11:18:57.4277PM | [1mINFO    [0m] [1mEXO_LIBP2P_NAMESPACE: None[0m
+[ 11:18:57.4331PM | [1mINFO    [0m] [1mStarting node 12D3KooWPixtTNny2TNir3T98Z9jiaYvtbtRkVL8BEs4S8LqdBe3[0m
+[ 11:18:57.4767PM | [1mINFO    [0m] [1mRotated event log: /Users/xiewancheng/.exo/event_log/master/events.bin -> /Users/xiewancheng/.exo/event_log/master/events.2026-04-05_15-18-57_467987.bin.zst[0m
+[ 11:18:57.4827PM | [1mINFO    [0m] [1mStarting Election[0m
+[ 11:18:57.4828PM | [1mINFO    [0m] [1mStarting DownloadCoordinator[0m
+[ 11:18:57.4828PM | [1mINFO    [0m] [1mStarting Worker[0m
+[ 11:18:57.4829PM | [1mINFO    [0m] [1mStarting Master[0m
+[ 11:18:57.4830PM | [1mINFO    [0m] [1mStarting API[0m
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║                                                                       ║
+║   ███████╗██╗  ██╗ ██████╗                                            ║
+║   ██╔════╝╚██╗██╔╝██╔═══██╗                                           ║
+║   █████╗   ╚███╔╝ ██║   ██║                                           ║
+║   ██╔══╝   ██╔██╗ ██║   ██║                                           ║
+║   ███████╗██╔╝ ██╗╚██████╔╝                                           ║
+║   ╚══════╝╚═╝  ╚═╝ ╚═════╝                                            ║
+║                                                                       ║
+║   Distributed AI Inference Cluster                                    ║
+║                                                                       ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+╔═══════════════════════════════════════════════════════════════════════╗
+║                                                                       ║
+║  🌐 Dashboard & API Ready                                             ║
+║                                                                       ║
+║  http://localhost:52415                                               ║
+║                                                                       ║
+║  Click the URL above to open the dashboard in your browser            ║
+║                                                                       ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+
+[ 11:18:57.5360PM | [1mINFO    [0m] [1mSubscribed to global_events[0m
+[ 11:18:57.5383PM | [1mINFO    [0m] [1mNode elected Master[0m
+[ 11:18:57.5385PM | [1mINFO    [0m] [1mUnpausing API[0m
+[ 11:18:57.5391PM | [1mINFO    [0m] [1mRunning on http://0.0.0.0:52415 (CTRL + C to quit)[0m
+[ 11:18:57.5393PM | [1mINFO    [0m] [1mRunning on http://0.0.0.0:52415 (CTRL + C to quit)[0m
+[ 11:18:57.5405PM | [1mINFO    [0m] [1mSubscribed to local_events[0m
+[ 11:18:57.5614PM | [1mINFO    [0m] [1mSubscribed to commands[0m
+[ 11:18:57.5651PM | [1mINFO    [0m] [1mSubscribed to election_messages[0m
+[ 11:18:57.5660PM | [1mINFO    [0m] [1mSubscribed to connection_messages[0m
+[ 11:18:57.5672PM | [1mINFO    [0m] [1mSubscribed to download_commands[0m
+[ 11:18:57.6969PM | [1mINFO    [0m] [1mWaiting for other campaign to finish[0m
+[ 11:18:57.7398PM | [1mINFO    [0m] [1mCancelling other campaign[0m
+[ 11:18:57.7400PM | [1mINFO    [0m] [1mWaiting for other campaign to finish[0m
+[ 11:19:00.7422PM | [1mINFO    [0m] [1mNode elected Master[0m
+[ 11:19:00.7427PM | [1mINFO    [0m] [1mUnpausing API[0m
+[ 11:19:01.3670PM | [1mINFO    [0m] [1mExecuting command: RequestEventLog(command_id='4ac57033-474e-4fc1-adaa-914900033b61' since_idx=0)[0m
+[ 06:30:24.8819AM | [33m[1mWARNING [0m] [33m[1mconnect error RemoteProtocolError from fe80::1%lo0 after 3 attempts; treating as down[0m

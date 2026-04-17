@@ -1,10 +1,14 @@
 """OpenAI Chat Completions API adapter for converting requests/responses."""
 
 import base64
+import logging
+import os
 import re
 import time
 from collections.abc import AsyncGenerator
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from exo.api.types import (
     ChatCompletionChoice,
@@ -36,6 +40,58 @@ from exo.shared.types.text_generation import (
     resolve_reasoning_params,
 )
 
+_CONTENT_REASONING_FALLBACK_SENTINELS: frozenset[str] = frozenset(
+    {
+        "*",
+        '"',
+        "'",
+        "`",
+        ",",
+        "，",
+        ".",
+        "。",
+        "!",
+        "！",
+        "?",
+        "？",
+        ":",
+        "：",
+        ";",
+        "；",
+        "-",
+        "~",
+        "…",
+    }
+)
+
+
+def _looks_like_placeholder_content(content: str) -> bool:
+    stripped = content.strip()
+    if stripped == "" or stripped in _CONTENT_REASONING_FALLBACK_SENTINELS:
+        return True
+
+    if len(stripped) > 3:
+        return False
+
+    return all(not char.isalnum() for char in stripped)
+
+
+def openai_compatible_content(content: str, reasoning_content: str | None) -> str:
+    """Ensure OpenAI clients get usable content when thinking-only text is emitted.
+
+    Some thinking models may produce a tiny sentinel token (for example "*" or a
+    punctuation mark) in ``content`` while placing the meaningful answer in
+    ``reasoning_content``. Many OpenAI clients ignore ``reasoning_content`` and
+    treat this as an empty assistant reply.
+    """
+    if not reasoning_content:
+        return content
+
+    if _looks_like_placeholder_content(content):
+        return reasoning_content
+
+    return content
+
 
 def extract_base64_from_data_url(data_url: str) -> str:
     match = re.match(r"data:[^;]+;base64,(.+)", data_url)
@@ -53,6 +109,61 @@ async def fetch_image_url(url: str) -> str:
         resp.raise_for_status()
         data = await resp.read()
         return base64.b64encode(data).decode("ascii")
+
+
+_STRIP_SKILLS_BLOCK: bool = os.getenv("EXO_STRIP_SKILLS_BLOCK", "").lower() in {
+    "1", "true", "yes", "on"
+}
+_MAX_SYSTEM_PROMPT_CHARS: int | None = (
+    int(os.getenv("EXO_MAX_SYSTEM_PROMPT_CHARS", ""))
+    if os.getenv("EXO_MAX_SYSTEM_PROMPT_CHARS", "")
+    else None
+)
+_SKILLS_DESC_MAX_CHARS: int | None = (
+    int(os.getenv("EXO_SKILLS_DESC_MAX_CHARS", ""))
+    if os.getenv("EXO_SKILLS_DESC_MAX_CHARS", "")
+    else None
+)
+_SKILLS_BLOCK_RE = re.compile(
+    r"(<available_skills>.*?</available_skills>)",
+    re.DOTALL,
+)
+
+
+def _trim_skill_descriptions(block: str, max_chars: int) -> str:
+    """Truncate long description lines within an <available_skills> block.
+
+    Preserves skill names, file paths (.md), tags, and empty lines untouched.
+    Only shortens content lines that exceed max_chars.
+    """
+    lines = block.split("\n")
+    result: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        # Keep: empty lines, XML tags, file paths, skill name lines (short or contain /)
+        is_path = stripped.endswith(".md") or ("/" in stripped and not stripped.startswith("<"))
+        if not stripped or stripped.startswith("<") or is_path:
+            result.append(line)
+        elif len(stripped) > max_chars:
+            leading_ws = line[: len(line) - len(line.lstrip())]
+            result.append(leading_ws + stripped[:max_chars] + "…")
+        else:
+            result.append(line)
+    return "\n".join(result)
+
+
+def _trim_system_prompt(text: str) -> str:
+    """Trim system prompt per EXO_STRIP_SKILLS_BLOCK / EXO_SKILLS_DESC_MAX_CHARS / EXO_MAX_SYSTEM_PROMPT_CHARS."""
+    if _STRIP_SKILLS_BLOCK:
+        text = _SKILLS_BLOCK_RE.sub("", text).strip()
+    elif _SKILLS_DESC_MAX_CHARS is not None:
+        text = _SKILLS_BLOCK_RE.sub(
+            lambda m: _trim_skill_descriptions(m.group(1), _SKILLS_DESC_MAX_CHARS),  # type: ignore[arg-type]
+            text,
+        )
+    if _MAX_SYSTEM_PROMPT_CHARS is not None and len(text) > _MAX_SYSTEM_PROMPT_CHARS:
+        text = text[: _MAX_SYSTEM_PROMPT_CHARS] + " [trimmed]"
+    return text
 
 
 async def chat_request_to_text_generation(
@@ -99,6 +210,16 @@ async def chat_request_to_text_generation(
 
         # Extract system message as instructions
         if msg.role == "system":
+            original_len = len(content)
+            content = _trim_system_prompt(content)
+            trimmed_len = len(content)
+            if original_len != trimmed_len:
+                logger.info(
+                    f"[System prompt trim] {original_len} -> {trimmed_len} chars "
+                    f"(stripped {original_len - trimmed_len} chars)"
+                )
+            else:
+                logger.info(f"[System prompt] {original_len} chars (no trimming applied)")
             if instructions is None:
                 instructions = content
             else:
@@ -146,7 +267,7 @@ async def chat_request_to_text_generation(
         if input_messages
         else [InputMessage(role="user", content="")],
         instructions=instructions,
-        max_output_tokens=request.max_tokens,
+        max_output_tokens=request.max_completion_tokens or request.max_tokens,
         temperature=request.temperature,
         top_p=request.top_p,
         top_k=request.top_k,
@@ -347,6 +468,7 @@ async def collect_chat_response(
 
     combined_text = "".join(text_parts)
     combined_thinking = "".join(thinking_parts) if thinking_parts else None
+    compatible_content = openai_compatible_content(combined_text, combined_thinking)
     assert model is not None
 
     yield ChatCompletionResponse(
@@ -358,7 +480,7 @@ async def collect_chat_response(
                 index=0,
                 message=ChatCompletionMessage(
                     role="assistant",
-                    content=combined_text,
+                    content=compatible_content,
                     reasoning_content=combined_thinking,
                     tool_calls=tool_calls if tool_calls else None,
                 ),

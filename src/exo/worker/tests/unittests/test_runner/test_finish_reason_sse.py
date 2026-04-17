@@ -187,6 +187,67 @@ class TestDeepSeekV32FinishReason:
 
 
 class TestThinkingModelsFinishReason:
+    def test_think_end_and_answer_in_same_chunk(self):
+        tokens = [
+            _make_response("<think>", 0),
+            _make_response("reasoning", 1),
+            _make_response("</think>The answer is 42.", 2, finish_reason="stop"),
+        ]
+        results = _step_until_finish(
+            parse_thinking_models(
+                _queue_source(tokens),
+                think_start="<think>",
+                think_end="</think>",
+                starts_in_thinking=False,
+            )
+        )
+
+        thinking_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and r.is_thinking
+        )
+        final_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and not r.is_thinking
+        )
+
+        assert "reasoning" in thinking_text
+        assert "The answer is 42." in final_text
+        assert _got_finish(results)
+
+    def test_think_end_split_across_chunks_then_answer(self):
+        tokens = [
+            _make_response("<think>", 0),
+            _make_response("reasoning", 1),
+            _make_response("</thi", 2),
+            _make_response("nk>done", 3, finish_reason="stop"),
+        ]
+        results = _step_until_finish(
+            parse_thinking_models(
+                _queue_source(tokens),
+                think_start="<think>",
+                think_end="</think>",
+                starts_in_thinking=False,
+            )
+        )
+
+        thinking_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and r.is_thinking
+        )
+        final_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and not r.is_thinking
+        )
+
+        assert thinking_text == "reasoning"
+        assert final_text == "done"
+        assert _got_finish(results)
+
     def test_finish_reason_during_thinking(self):
         tokens = [
             _make_response("<think>", 0),

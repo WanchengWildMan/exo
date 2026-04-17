@@ -1,3 +1,4 @@
+import os
 from collections.abc import Generator, Mapping
 
 from loguru import logger
@@ -18,18 +19,47 @@ from exo.shared.types.worker.shards import (
 )
 
 
+def _use_total_memory_for_placement() -> bool:
+    return os.getenv("EXO_USE_TOTAL_MEMORY_FOR_PLACEMENT", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _skip_placement_memory_checks() -> bool:
+    return os.getenv("EXO_SKIP_PLACEMENT_MEMORY_CHECK", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _placement_memory(memory_usage: MemoryUsage) -> Memory:
+    return (
+        memory_usage.ram_total
+        if _use_total_memory_for_placement()
+        else memory_usage.ram_available
+    )
+
+
 def filter_cycles_by_memory(
     cycles: list[Cycle],
     node_memory: Mapping[NodeId, MemoryUsage],
     required_memory: Memory,
 ) -> list[Cycle]:
+    if _skip_placement_memory_checks():
+        return [cycle for cycle in cycles if all(node in node_memory for node in cycle)]
+
     filtered_cycles: list[Cycle] = []
     for cycle in cycles:
         if not all(node in node_memory for node in cycle):
             continue
 
         total_mem = sum(
-            (node_memory[node_id].ram_available for node_id in cycle.node_ids),
+            (_placement_memory(node_memory[node_id]) for node_id in cycle.node_ids),
             start=Memory(),
         )
         if total_mem >= required_memory:
@@ -85,7 +115,7 @@ def _compute_total_memory(
     node_memory: Mapping[NodeId, MemoryUsage],
 ) -> Memory:
     total_memory = sum(
-        (node_memory[node_id].ram_available for node_id in node_ids),
+        (_placement_memory(node_memory[node_id]) for node_id in node_ids),
         start=Memory(),
     )
     if total_memory.in_bytes == 0:
@@ -102,21 +132,28 @@ def _allocate_and_validate_layers(
     layer_allocations = allocate_layers_proportionally(
         total_layers=model_card.n_layers,
         memory_fractions=[
-            node_memory[node_id].ram_available / total_memory for node_id in node_ids
+            _placement_memory(node_memory[node_id]) / total_memory
+            for node_id in node_ids
         ],
     )
+
+    if _skip_placement_memory_checks():
+        return layer_allocations
 
     total_storage = model_card.storage_size
     total_layers = model_card.n_layers
     for i, node_id in enumerate(node_ids):
         node_layers = layer_allocations[i]
         required_memory = (total_storage * node_layers) // total_layers
-        available_memory = node_memory[node_id].ram_available
+        available_memory = _placement_memory(node_memory[node_id])
         if required_memory > available_memory:
+            memory_mode = (
+                "total" if _use_total_memory_for_placement() else "available"
+            )
             raise ValueError(
                 f"Node {i} ({node_id}) has insufficient memory: "
                 f"requires {required_memory.in_gb:.2f} GB for {node_layers} layers, "
-                f"but only has {available_memory.in_gb:.2f} GB available"
+                f"but only has {available_memory.in_gb:.2f} GB ({memory_mode})"
             )
 
     return layer_allocations

@@ -1,0 +1,37 @@
+%%==================================================
+%% abstract.tex for BIT Master Thesis
+%% modified by yang yating
+%% version: 0.1
+%% last update: Dec 25th, 2016
+%%==================================================
+
+
+\begin{abstract}
+\linespread{1.33}\selectfont
+随着移动通信的发展和无人机的广泛应用，无人机通信网络的频谱资源难以满足日益增长的智能任务数据传输需求。为此，基于深度学习的语义通信提取并传输数据的语义信息以减少冗余，为上述场景提供了新的传输方式。然而，语义压缩在降低传输数据量的同时，也影响接收端数据质量，并与信道分配、功率控制等无线资源变量形成耦合。现有研究在以下两类场景中存在不足：一是在无人机中继辅助的设备间语义信息交换场景中，用户配对拓扑变化使信道质量时变，现有研究多基于固定拓扑特征设计语义传输优化方案，对时变拓扑下的语义传输优化适应性不足。二是随着多模态大语言模型应用的兴起，语义网络的编码效能面临更高要求，且任务传输与处理周期更长，需要多无人机与地面设备协同服务分散用户，现有研究对此类网络的建模与资源调度尚未涉及。针对上述问题，本文开展基于深度强化学习的无人机辅助语义通信网络资源优化研究，主要内容如下：
+
+首先，研究无人机辅助的设备间语义通信网络资源优化问题。
+针对基站覆盖受限区域中用户交换文本语义信息的需求，考虑用户进行设备间通信，并引入无人机作为中继改善链路质量，建立无人机中继辅助的语义传输网络模型。
+在该模型中，多对用户随机匹配且面临干扰，语义符号数量决定传输数据量与下游任务效果，与信道分配、功率控制、中继选择和轨迹构成多维耦合的优化变量。
+以综合语义速率与语义相似度的用户体验质量为优化目标，利用异构图提取网络拓扑中的用户关联关系，使策略网络有效提取拓扑结构特征，提出基于图卷积神经网络的近端策略优化强化学习求解方案。
+仿真结果表明，所提方案在体验质量上优于多种基准方案，提升幅度相比基于全连接网络的近端策略优化方案高48\%。
+
+进一步，研究多无人机辅助多模态语义通信网络的通信与计算资源联合优化问题。
+面向多模态大语言模型任务处理场景，建立多无人机与地面资源设备协同的系统模型，采用具有低功耗与鲁棒性优势的脉冲神经网络对各模态分别提取语义特征并压缩传输，引入跨时隙任务传输与处理模型描述任务的长期状态转移过程。
+以长期任务效用为优化目标，综合考虑用户等待时长、任务完成代价与奖励等指标，联合优化语义压缩、功率与频谱分配、中继选择、无人机轨迹与处理设备分配。
+针对该网络资源调度的动作空间维度高、调度周期长的问题，将用户和无人机分别建模为两类智能体以解耦多节点任务处理与无人机轨迹规划决策，提出基于异构多智能体近端策略优化的协同资源调度方案。
+仿真结果表明，所提方案的效用值从初始的约$-99.7$提升至约270.2，较单智能体近端策略优化方案高约66\%。
+\end{abstract}
+
+\keywords{智能通信；无人机通信；语义通信；智能资源优化；深度强化学习}
+
+\begin{enabstract}
+\linespread{1.33}\selectfont
+With the development of mobile communications and the widespread deployment of unmanned aerial vehicles (UAVs), the spectrum resources of UAV communication networks can hardly meet the growing demand for intelligent task data transmission. To this end, deep learning-based semantic communication extracts and transmits the semantic information of data to reduce redundancy, providing a new transmission paradigm for these scenarios. However, semantic compression also affects the data quality at the receiver while reducing the transmitted data volume, and is coupled with wireless resource variables such as channel allocation and power control. Existing studies have shortcomings in the following two types of scenarios. First, in UAV relay-assisted D2D semantic information exchange scenarios, user pairing topology changes cause channel quality to vary over time, yet existing studies mostly design semantic transmission optimization schemes based on fixed topology features, with insufficient adaptability to semantic transmission optimization under time-varying topologies. Second, with the rise of multi-modal large language model applications, semantic networks face higher encoding efficiency requirements and task transmission and processing cycles become longer, requiring multiple UAVs and ground devices to cooperatively serve dispersed users, yet existing studies have not addressed the modeling and resource scheduling of such networks. Targeting these problems, this thesis employs deep reinforcement learning to study resource optimization in UAV-assisted semantic communication networks. The main contents are as follows.
+
+First, the resource optimization problem for UAV-assisted D2D semantic communication networks is studied. For users exchanging text semantic information in areas with limited base station coverage, D2D communication is adopted and a UAV relay is introduced to improve link quality, forming a UAV relay-assisted semantic transmission network model. In this model, multiple user pairs are randomly matched and face interference, and the number of semantic symbols determines the transmitted data volume and downstream task performance, constituting multi-dimensionally coupled optimization variables together with channel allocation, power control, relay selection, and trajectory. With quality of experience that integrates semantic rate and semantic similarity as the optimization objective, a heterogeneous graph is used to extract user association relationships in the network topology, enabling the policy network to effectively capture topological features. A graph convolutional network-based proximal policy optimization reinforcement learning solution is proposed. Simulation results show that the proposed scheme outperforms multiple baselines in QoE, with an improvement margin that is 48\% higher than that of the fully-connected-network-based Proximal Policy Optimization scheme.
+
+Furthermore, the joint communication and computation resource optimization problem in multi-UAV cooperative multi-modal semantic communication networks is studied. For multi-modal large language model task processing scenarios, a cooperative system model with multiple UAVs and ground resource devices is established, where spiking neural networks with low-power and robustness advantages extract and compress semantic features for each modality separately, and a cross-slot task transmission and processing model describes the long-term state transition of tasks. With long-term task utility as the optimization objective, jointly considering user waiting time, task completion cost, and reward, the scheme jointly optimizes semantic compression, power and spectrum allocation, relay selection, UAV trajectory, and processing device assignment. Targeting the high-dimensional action space and long scheduling horizon of the network resource scheduling, users and UAVs are modeled as two types of agents to decouple multi-node task processing from UAV trajectory planning decisions, and a collaborative resource scheduling scheme based on heterogeneous multi-agent proximal policy optimization is proposed. Simulation results show that the utility value of the proposed scheme increases from approximately $-99.7$ to approximately 270.2, about 66\% higher than the single-agent Proximal Policy Optimization scheme.
+\end{enabstract}
+
+\enkeywords{intelligent communication; UAV communication; semantic communication; intelligent resource optimization; deep reinforcement learning}

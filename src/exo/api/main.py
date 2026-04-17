@@ -2,6 +2,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import os
 import random
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
@@ -176,6 +177,13 @@ from exo.shared.types.state import State
 from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.worker.downloads import DownloadCompleted
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from exo.shared.types.worker.runners import (
+    RunnerLoading,
+    RunnerLoaded,
+    RunnerReady,
+    RunnerRunning,
+    RunnerWarmingUp,
+)
 from exo.shared.types.worker.shards import Sharding
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
@@ -225,6 +233,8 @@ class API:
 
         self.paused: bool = False
         self.paused_ev: anyio.Event = anyio.Event()
+        self._instance_autocreate_lock = anyio.Lock()
+        self._recent_instance_autocreate_requests: dict[ModelId, float] = {}
 
         self.app = FastAPI()
 
@@ -792,8 +802,10 @@ class API:
         """OpenAI Chat Completions API - adapter."""
         task_params = await chat_request_to_text_generation(payload)
         resolved_model = await self._resolve_and_validate_text_model(
-            ModelId(task_params.model)
+            ModelId(task_params.model),
+            allow_auto_create=True,
         )
+
         task_params = task_params.model_copy(update={"model": resolved_model})
 
         command = await self._send_text_generation_with_images(task_params)
@@ -827,7 +839,8 @@ class API:
     ) -> BenchChatCompletionResponse:
         task_params = await chat_request_to_text_generation(payload)
         resolved_model = await self._resolve_and_validate_text_model(
-            ModelId(task_params.model)
+            ModelId(task_params.model),
+            allow_auto_create=False,
         )
         task_params = task_params.model_copy(update={"model": resolved_model})
 
@@ -837,21 +850,165 @@ class API:
 
         return await self._collect_text_generation_with_stats(command.command_id)
 
-    async def _resolve_and_validate_text_model(self, model_id: ModelId) -> ModelId:
+    async def _resolve_and_validate_text_model(
+        self, model_id: ModelId, *, allow_auto_create: bool
+    ) -> ModelId:
         """Validate a text model exists and return the resolved model ID.
 
         Raises HTTPException 404 if no instance is found for the model.
         """
-        if not any(
-            instance.shard_assignments.model_id == model_id
-            for instance in self.state.instances.values()
-        ):
+        if self._has_instance_for_model(model_id):
+            self._recent_instance_autocreate_requests.pop(model_id, None)
+            return model_id
+
+        if not self._has_instance_for_model(model_id):
+            auto_create_on_chat = os.getenv(
+                "EXO_AUTO_CREATE_INSTANCE_ON_CHAT", "1"
+            ).lower() in {"1", "true", "yes", "on"}
+
+            placement_error: str | None = None
+            if allow_auto_create and auto_create_on_chat:
+                async with self._instance_autocreate_lock:
+                    if not self._has_instance_for_model(model_id):
+                        cooldown_seconds_raw = os.getenv(
+                            "EXO_AUTO_CREATE_COOLDOWN_SECONDS", "30"
+                        )
+                        cooldown_seconds = 30.0
+                        with contextlib.suppress(ValueError):
+                            cooldown_seconds = float(cooldown_seconds_raw)
+
+                        recently_requested = self._was_instance_autocreate_requested_recently(
+                            model_id,
+                            cooldown_seconds=max(0.0, cooldown_seconds),
+                        )
+
+                        created = False
+                        if not recently_requested:
+                            created, placement_error = (
+                                await self._create_instance_for_model_on_demand(
+                                    model_id
+                                )
+                            )
+                            if created:
+                                self._mark_instance_autocreate_requested(model_id)
+                        else:
+                            placement_error = (
+                                "instance creation already requested; waiting for readiness"
+                            )
+
+                        if created or recently_requested:
+                            wait_seconds_raw = os.getenv(
+                                "EXO_AUTO_CREATE_WAIT_SECONDS", "45"
+                            )
+                            wait_seconds = 45.0
+                            with contextlib.suppress(ValueError):
+                                wait_seconds = float(wait_seconds_raw)
+                            if wait_seconds > 0 and await self._wait_for_instance(
+                                model_id, wait_seconds
+                            ):
+                                self._recent_instance_autocreate_requests.pop(
+                                    model_id, None
+                                )
+                                return model_id
+                            placement_error = (
+                                f"timed out waiting for instance to become ready in {wait_seconds:.1f}s"
+                            )
+
             await self._trigger_notify_user_to_download_model(model_id)
+            detail = f"No instance found for model {model_id}"
+            if placement_error:
+                detail = f"{detail} (auto-create failed: {placement_error})"
             raise HTTPException(
                 status_code=404,
-                detail=f"No instance found for model {model_id}",
+                detail=detail,
             )
         return model_id
+
+    def _has_instance_for_model(self, model_id: ModelId) -> bool:
+        for instance in self.state.instances.values():
+            if instance.shard_assignments.model_id != model_id:
+                continue
+            runner_ids = instance.shard_assignments.runner_to_shard.keys()
+            if all(
+                isinstance(
+                    self.state.runners.get(runner_id, None),
+                    (RunnerLoading, RunnerLoaded, RunnerWarmingUp, RunnerReady, RunnerRunning),
+                )
+                for runner_id in runner_ids
+            ):
+                return True
+        return False
+
+    def _mark_instance_autocreate_requested(self, model_id: ModelId) -> None:
+        self._recent_instance_autocreate_requests[model_id] = time.monotonic()
+
+    def _was_instance_autocreate_requested_recently(
+        self, model_id: ModelId, *, cooldown_seconds: float
+    ) -> bool:
+        timestamp = self._recent_instance_autocreate_requests.get(model_id)
+        if timestamp is None:
+            return False
+        if time.monotonic() - timestamp <= cooldown_seconds:
+            return True
+        self._recent_instance_autocreate_requests.pop(model_id, None)
+        return False
+
+    async def _create_instance_for_model_on_demand(
+        self, model_id: ModelId
+    ) -> tuple[bool, str | None]:
+        if len(list(self.state.topology.list_nodes())) == 0:
+            return (False, "no nodes in topology")
+
+        try:
+            model_card = await ModelCard.load(model_id)
+        except Exception as exc:
+            return (False, f"failed to load model card: {exc}")
+
+        last_error: str | None = None
+        node_count = len(list(self.state.topology.list_nodes()))
+
+        for min_nodes in range(node_count, 0, -1):
+            try:
+                placements = get_instance_placements(
+                    PlaceInstance(
+                        model_card=model_card,
+                        sharding=Sharding.Pipeline,
+                        instance_meta=InstanceMeta.MlxRing,
+                        min_nodes=min_nodes,
+                    ),
+                    node_memory=self.state.node_memory,
+                    node_network=self.state.node_network,
+                    topology=self.state.topology,
+                    current_instances=self.state.instances,
+                    download_status=self.state.downloads,
+                )
+            except ValueError as exc:
+                last_error = str(exc)
+                continue
+
+            current_ids = set(self.state.instances.keys())
+            new_ids = [
+                instance_id
+                for instance_id in placements
+                if instance_id not in current_ids
+            ]
+            if len(new_ids) != 1:
+                last_error = "Expected exactly one new instance from placement"
+                continue
+
+            created_instance = placements[new_ids[0]]
+            await self._send(CreateInstance(instance=created_instance))
+            return (True, None)
+
+        return (False, last_error)
+
+    async def _wait_for_instance(self, model_id: ModelId, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if self._has_instance_for_model(model_id):
+                return True
+            await anyio.sleep(0.5)
+        return self._has_instance_for_model(model_id)
 
     async def _validate_image_model(self, model: ModelId) -> ModelId:
         """Validate model exists and return resolved model ID.
@@ -1624,11 +1781,17 @@ class API:
         return {"version": "exo v1.0"}
 
     def _calculate_total_available_memory(self) -> Memory:
-        """Calculate total available memory across all nodes in bytes."""
-        total_available = Memory()
+        """Calculate total available memory across all nodes in bytes.
 
+        Respects EXO_USE_TOTAL_MEMORY_FOR_PLACEMENT: when set (the default),
+        uses ram_total so that memory checks match the placement algorithm.
+        """
+        use_total = os.getenv("EXO_USE_TOTAL_MEMORY_FOR_PLACEMENT", "1").lower() not in {
+            "0", "false", "no", "off"
+        }
+        total_available = Memory()
         for memory in self.state.node_memory.values():
-            total_available += memory.ram_available
+            total_available += memory.ram_total if use_total else memory.ram_available
 
         return total_available
 

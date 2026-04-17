@@ -5,6 +5,7 @@ from exo.shared.types.worker.runners import (
     RunnerIdle,
     RunnerLoaded,
     RunnerLoading,
+    RunnerReady,
     RunnerWarmingUp,
 )
 from exo.utils.keyed_backoff import KeyedBackoff
@@ -206,6 +207,50 @@ def test_plan_does_not_start_warmup_for_rank_zero_until_others_warming():
     all_runners = {
         RUNNER_1_ID: RunnerLoaded(),
         RUNNER_2_ID: RunnerWarmingUp(),
+    }
+
+    result = plan_mod.plan(
+        node_id=NODE_A,
+        runners=runners,  # type: ignore
+        global_download_status={NODE_A: []},
+        instances=instances,
+        all_runners=all_runners,
+        tasks={},
+        input_chunk_buffer={},
+        instance_backoff=KeyedBackoff(),
+        download_backoff=KeyedBackoff(),
+    )
+
+    assert isinstance(result, StartWarmup)
+    assert result.instance_id == INSTANCE_1_ID
+
+
+def test_plan_starts_warmup_for_rank_zero_when_others_already_ready():
+    """
+    Rank-zero shard should start warmup when non-zero ranks are already Ready.
+    This prevents deadlock when peers transition WarmingUp -> Ready before rank 0 plans.
+    """
+    shard0 = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=2)
+    shard1 = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=1, world_size=2)
+    instance = get_mlx_ring_instance(
+        instance_id=INSTANCE_1_ID,
+        model_id=MODEL_A_ID,
+        node_to_runner={NODE_A: RUNNER_1_ID, NODE_B: RUNNER_2_ID},
+        runner_to_shard={RUNNER_1_ID: shard0, RUNNER_2_ID: shard1},
+    )
+
+    bound_instance = BoundInstance(
+        instance=instance, bound_runner_id=RUNNER_1_ID, bound_node_id=NODE_A
+    )
+    local_runner = FakeRunnerSupervisor(
+        bound_instance=bound_instance, status=RunnerLoaded()
+    )
+
+    runners = {RUNNER_1_ID: local_runner}
+    instances = {INSTANCE_1_ID: instance}
+    all_runners = {
+        RUNNER_1_ID: RunnerLoaded(),
+        RUNNER_2_ID: RunnerReady(),
     }
 
     result = plan_mod.plan(

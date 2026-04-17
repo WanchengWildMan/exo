@@ -2,15 +2,12 @@
 
 set -euo pipefail
 
-# Ensure homebrew binaries (uv, etc.) are in PATH (needed for SSH/nohup sessions)
-export PATH="/opt/homebrew/bin:${PATH}"
-
 MODE="${1:-fg}"
 if [[ $# -gt 0 ]]; then
 	shift
 fi
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LOG_DIR="${ROOT_DIR}/tmp"
 LOG_FILE="${LOG_DIR}/exo-start.log"
 PID_FILE="${LOG_DIR}/exo-start.pid"
@@ -19,47 +16,18 @@ mkdir -p "${LOG_DIR}"
 
 EXO_ENV=(
 	EXO_FAST_SYNCH=on
-	EXO_PREFILL_STEP_SIZE=32
+	EXO_PREFILL_STEP_SIZE=512
 	EXO_KV_CACHE_BITS=2
 	EXO_CACHE_GROUP_SIZE=32
-	EXO_MAX_KV_SIZE=1500
-	EXO_KEEP_KV_SIZE=64
-	EXO_PREFILL_EVAL_INTERVAL=1
-	EXO_MAX_TOKENS=2048
+	EXO_MAX_TOKENS=4096
 	EXO_NO_BATCH=1
 	EXO_REQUIRE_READY_INSTANCE=1
 	EXO_USE_TOTAL_MEMORY_FOR_PLACEMENT=1
 	EXO_SKIP_PLACEMENT_MEMORY_CHECK=1
-	EXO_MEMORY_THRESHOLD=0.95
-	EXO_PREFILL_MIN_AVAILABLE_GB=0.5
-	EXO_PREFILL_SYNC_TIMEOUT=60
-	EXO_SKILLS_DESC_MAX_CHARS=30
-	EXO_MAX_SYSTEM_PROMPT_CHARS=2000
 	EXO_DISABLE_JACCL=1
-	# oMLX内存管理集成 (P0/P1/P2)
-	EXO_PREFILL_MAX_METAL_GB=0
-	EXO_GENERATION_MEMORY_CHECK_INTERVAL=64
-	EXO_SSD_CACHE_ENABLED=1
-	EXO_SSD_CACHE_MAX_GB=20
-	EXO_SSD_CACHE_DIR=/Volumes/External/exo_cache/kv_cache
-	# Decode阶段内存清理间隔（对齐oMLX，每步都清理）
-	EXO_DECODE_SYNC_INTERVAL=4
-	# Decode内存安全阀：超过此值时强制结束生成（0=自动：total_ram-1.5GB）
-	EXO_DECODE_MAX_METAL_GB=0
 )
 
-ensure_api_port_free() {
-	local pids
-	pids="$(lsof -tiTCP:52415 -sTCP:LISTEN 2>/dev/null || true)"
-	if [[ -n "${pids}" ]]; then
-		echo "port 52415 is already in use by: ${pids}"
-		echo "stop the existing exo process before starting a new one"
-		exit 1
-	fi
-}
-
 start_bg() {
-	ensure_api_port_free
 	if [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
 		echo "exo is already running in background (pid $(cat "${PID_FILE}"))"
 		return 0
@@ -67,7 +35,7 @@ start_bg() {
 
 	(
 		cd "${ROOT_DIR}"
-		env "${EXO_ENV[@]}" uv run exo "$@"
+		env "${EXO_ENV[@]}" uv run exo  "$@"
 	) >"${LOG_FILE}" 2>&1 &
 
 	echo $! >"${PID_FILE}"
@@ -76,9 +44,8 @@ start_bg() {
 }
 
 start_fg() {
-	ensure_api_port_free
 	cd "${ROOT_DIR}"
-	exec env "${EXO_ENV[@]}" uv run exo "$@"
+	exec env "${EXO_ENV[@]}" uv run exo  "$@"
 }
 
 stop_bg() {

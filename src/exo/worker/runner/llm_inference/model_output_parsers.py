@@ -304,25 +304,101 @@ def parse_thinking_models(
     """Route thinking tokens via is_thinking flag.
 
     Swallows think tag tokens, sets is_thinking on all others.
+    Handles markers embedded inside larger text chunks and markers split across
+    adjacent chunks.
     Always yields tokens with finish_reason to avoid hanging the chunk stream.
     """
+
+    def _trailing_prefix_len(text: str, marker: str | None) -> int:
+        if marker is None:
+            return 0
+        max_prefix_len = min(len(text), len(marker) - 1)
+        for prefix_len in range(max_prefix_len, 0, -1):
+            if marker.startswith(text[-prefix_len:]):
+                return prefix_len
+        return 0
+
+    def _split_text(
+        text: str,
+        *,
+        is_thinking: bool,
+        allow_partial_tail: bool,
+    ) -> tuple[list[tuple[str, bool]], bool, str]:
+        parts: list[tuple[str, bool]] = []
+        cursor = 0
+        current_is_thinking = is_thinking
+
+        while cursor < len(text):
+            marker = think_end if current_is_thinking else think_start
+            if marker is None or marker == "":
+                parts.append((text[cursor:], current_is_thinking))
+                return parts, current_is_thinking, ""
+
+            marker_index = text.find(marker, cursor)
+            if marker_index == -1:
+                remainder = text[cursor:]
+                if allow_partial_tail:
+                    trailing_prefix_len = _trailing_prefix_len(remainder, marker)
+                    emit_text = (
+                        remainder[:-trailing_prefix_len]
+                        if trailing_prefix_len > 0
+                        else remainder
+                    )
+                    if emit_text:
+                        parts.append((emit_text, current_is_thinking))
+                    trailing_fragment = (
+                        remainder[-trailing_prefix_len:]
+                        if trailing_prefix_len > 0
+                        else ""
+                    )
+                    return parts, current_is_thinking, trailing_fragment
+
+                if remainder:
+                    parts.append((remainder, current_is_thinking))
+                return parts, current_is_thinking, ""
+
+            if marker_index > cursor:
+                parts.append((text[cursor:marker_index], current_is_thinking))
+
+            current_is_thinking = not current_is_thinking
+            cursor = marker_index + len(marker)
+
+        return parts, current_is_thinking, ""
+
     is_thinking = starts_in_thinking
+    pending_fragment = ""
     for response in responses:
         if response is None:
             yield None
             continue
-        if response.finish_reason is not None:
+
+        combined_text = f"{pending_fragment}{response.text}"
+        allow_partial_tail = response.finish_reason is None
+        parts, is_thinking, pending_fragment = _split_text(
+            combined_text,
+            is_thinking=is_thinking,
+            allow_partial_tail=allow_partial_tail,
+        )
+
+        if response.finish_reason is not None and pending_fragment:
+            parts.append((pending_fragment, is_thinking))
+            pending_fragment = ""
+
+        emitted = False
+        for index, (part_text, part_is_thinking) in enumerate(parts):
+            is_last_part = index == len(parts) - 1
+            finish_reason = response.finish_reason if is_last_part else None
+            yield response.model_copy(
+                update={
+                    "text": part_text,
+                    "is_thinking": False if finish_reason is not None else part_is_thinking,
+                    "finish_reason": finish_reason,
+                }
+            )
+            emitted = True
+
+        if response.finish_reason is not None and not emitted:
             yield response.model_copy(update={"is_thinking": False})
-            continue
-
-        if response.text == think_start:
-            is_thinking = True
-            continue
-        if response.text == think_end:
-            is_thinking = False
-            continue
-
-        yield response.model_copy(update={"is_thinking": is_thinking})
 
 
 def parse_tool_calls(

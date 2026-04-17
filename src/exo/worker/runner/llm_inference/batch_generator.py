@@ -21,6 +21,8 @@ from exo.worker.engines.mlx.cache import KVPrefixCache
 from exo.worker.engines.mlx.generator.batch_generate import ExoBatchGenerator
 from exo.worker.engines.mlx.generator.generate import (
     PrefillCancelled,
+    PrefillOOM,
+    PrefillSyncTimeout,
     mlx_generate,
     warmup_inference,
 )
@@ -213,6 +215,13 @@ class SequentialGenerator(InferenceGenerator):
             if self._queue:
                 self._start_next()
 
+        except (PrefillOOM, PrefillSyncTimeout) as e:
+            logger.error(f"Prefill failed for task {task.task_id}: {e}")
+            self._send_error(task, RuntimeError(str(e)))
+            self._active = None
+            if self._queue:
+                self._start_next()
+
         except Exception as e:
             self._send_error(task, e)
             self._active = None
@@ -277,11 +286,20 @@ class SequentialGenerator(InferenceGenerator):
                 )
 
         def distributed_prompt_progress_callback() -> None:
+            logger.info(
+                f"[R{self.device_rank}] Prefill sync: checking cancellations for task {task.task_id}"
+            )
             self.agree_on_cancellations()
             if self.should_cancel(task.task_id):
                 raise PrefillCancelled()
 
+            logger.info(
+                f"[R{self.device_rank}] Prefill sync: agreeing task queue for task {task.task_id}"
+            )
             self.agree_on_tasks()
+            logger.info(
+                f"[R{self.device_rank}] Prefill sync: collective callbacks finished for task {task.task_id}"
+            )
 
         tokens_since_cancel_check = self.check_for_cancel_every
 
@@ -403,7 +421,10 @@ class BatchGenerator(InferenceGenerator):
             task = self._queue.popleft()
             try:
                 uid = self._start_task(task)
-            except PrefillCancelled:
+            except (PrefillCancelled, PrefillOOM, PrefillSyncTimeout) as e:
+                if isinstance(e, (PrefillOOM, PrefillSyncTimeout)):
+                    logger.error(f"Prefill failed for task {task.task_id}: {e}")
+                    self._send_error(task, RuntimeError(str(e)))
                 continue
             except Exception as e:
                 self._send_error(task, e)
@@ -510,11 +531,20 @@ class BatchGenerator(InferenceGenerator):
                 )
 
         def distributed_prompt_progress_callback() -> None:
+            logger.info(
+                f"[R{self.device_rank}] Prefill sync: checking cancellations for task {task.task_id}"
+            )
             self.agree_on_cancellations()
             if self.should_cancel(task.task_id):
                 raise PrefillCancelled()
 
+            logger.info(
+                f"[R{self.device_rank}] Prefill sync: agreeing task queue for task {task.task_id}"
+            )
             self.agree_on_tasks()
+            logger.info(
+                f"[R{self.device_rank}] Prefill sync: collective callbacks finished for task {task.task_id}"
+            )
 
         tokens_since_cancel_check = self.check_for_cancel_every
 

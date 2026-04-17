@@ -128,6 +128,11 @@ _PREFILL_MAX_METAL_GB: float = float(os.getenv("EXO_PREFILL_MAX_METAL_GB", "0"))
 # Fallback: minimum available system RAM (in GB) below which prefill is aborted.
 # Only used when mx.get_active_memory() is unavailable.
 _PREFILL_MIN_AVAILABLE_GB: float = float(os.getenv("EXO_PREFILL_MIN_AVAILABLE_GB", "0.5"))
+
+# ── Decode-phase memory management (aligned with oMLX) ──────────────────────
+# Interval for mx.synchronize() + mx.clear_cache() during stream_generate decode.
+# Shared env var with the batch decode path in opt_batch_gen.py.
+_DECODE_SYNC_INTERVAL: int = int(os.getenv("EXO_DECODE_SYNC_INTERVAL", "1"))
 # Interval (in steps) between forced mx.eval() calls during prefill to flush the
 # MLX computation graph and free intermediate activation memory.  Without this the
 # graph accumulates over all chunks and causes OOM long before the KV cache itself
@@ -387,6 +392,102 @@ def pipeline_parallel_prefill(
     )
 
 
+def _single_node_prefill_chunk_size(
+    *,
+    requested_step_size: int,
+    processed_tokens: int,
+    remaining_tokens: int,
+) -> int:
+    """Compute a safer per-chunk prefill size for single-node prefill.
+
+    In long prompts, Metal OOM is usually caused by transient per-chunk activations,
+    not KV growth itself. We progressively shrink chunk size as context grows and
+    memory headroom decreases.
+    """
+    chunk_size = min(requested_step_size, remaining_tokens)
+
+    # Context-length based clamp: transient memory grows with context length.
+    if processed_tokens >= 512:
+        # 16GB 设备上，长上下文阶段的瞬时峰值非常敏感。
+        # 保活优先：512 token 之后退化为每次 1 token prefill。
+        chunk_size = 1
+
+    # Headroom-based clamp: keep distance from Metal limit spikes.
+    active_gb = mx.get_active_memory() / (1024**3)
+    headroom_gb = _get_metal_memory_limit_gb() - active_gb
+    if headroom_gb < 3.0:
+        chunk_size = 1
+    elif headroom_gb < 4.0:
+        chunk_size = min(chunk_size, 2)
+
+    return max(1, chunk_size)
+
+
+def single_node_prefill(
+    model: Model,
+    prompt: mx.array,
+    prompt_cache: KVCacheType,
+    prefill_step_size: int,
+    kv_group_size: int | None,
+    kv_bits: int | None,
+    prompt_progress_callback: Callable[[int, int], None],
+) -> None:
+    """Prefill for non-pipeline mode with adaptive chunking.
+
+    This mirrors pipeline prefill side effects but runs on a single node and allows
+    adaptive chunk size reduction to avoid transient Metal OOM spikes.
+    """
+    quantize_cache_fn: Callable[..., None] = functools.partial(
+        maybe_quantize_kv_cache,
+        quantized_kv_start=0,
+        kv_group_size=kv_group_size,
+        kv_bits=kv_bits,
+    )
+
+    total = len(prompt)
+    processed = 0
+    step = 0
+    t_start = time.perf_counter()
+
+    prompt_progress_callback(0, total)
+
+    # Keep the same behavior as stream_generate/pipeline prefill: prefill up to
+    # the penultimate token, then run 2 final single-token passes.
+    remaining = total - 1
+    with mx.stream(generation_stream):
+        while remaining > 0:
+            chunk_size = _single_node_prefill_chunk_size(
+                requested_step_size=prefill_step_size,
+                processed_tokens=processed,
+                remaining_tokens=remaining,
+            )
+            model(
+                prompt[processed : processed + chunk_size][None],
+                cache=prompt_cache,
+            )
+            quantize_cache_fn(prompt_cache)
+            processed += chunk_size
+            remaining -= chunk_size
+
+            _maybe_eval_cache(prompt_cache, step)
+            prompt_progress_callback(processed, total)
+            _check_memory_during_prefill(step, processed, total)
+            step += 1
+
+    for _ in range(2):
+        with mx.stream(generation_stream):
+            model(prompt[-1:][None], cache=prompt_cache)
+            quantize_cache_fn(prompt_cache)
+
+    with mx.stream(generation_stream):
+        mx.eval([c.state for c in prompt_cache])  # type: ignore
+
+    prompt_progress_callback(total, total)
+    logger.info(
+        f"Single-node prefill complete: {processed} tokens in {(time.perf_counter() - t_start) * 1000:.1f}ms"
+    )
+
+
 def _estimate_prefill_peak_bytes(model: Model, num_tokens: int, prefill_step_size: int) -> int:
     """Estimate peak memory for a single prefill chunk.
 
@@ -503,6 +604,10 @@ def prefill(
         _prefill_step_counter[0] += 1
         if has_ssm:
             snapshots.append(snapshot_ssm_states(cache))
+            # Keep only a tiny rolling window for trim rollback.
+            # Unbounded snapshots cause linear memory growth on long prefills.
+            if len(snapshots) > 2:
+                snapshots.pop(0)
 
         if on_prefill_progress is not None:
             on_prefill_progress(processed, total)
@@ -539,22 +644,16 @@ def prefill(
                 group=group,
             )
         else:
-            logger.info("Using stream_generate logic for prefill...")
-            # Use max_tokens=1 because max_tokens=0 does not work.
-            # We just throw away the generated token - we only care about filling the cache
-            for _ in stream_generate(
+            logger.info("Using single_node_prefill logic with adaptive chunking...")
+            single_node_prefill(
                 model=model,
-                tokenizer=tokenizer,
                 prompt=prompt_tokens,
-                max_tokens=1,
-                sampler=sampler,
                 prompt_cache=cache,
                 prefill_step_size=prefill_step_size,
                 kv_group_size=KV_GROUP_SIZE,
                 kv_bits=KV_BITS,
                 prompt_progress_callback=combined_progress_callback,
-            ):
-                break  # Stop after first iteration - cache is now filled
+            )
     except PrefillCancelled:
         set_pipeline_queue_sends(model, queue_sends=False)
         set_pipeline_prefill(model, is_prefill=False)
@@ -573,7 +672,12 @@ def prefill(
 
     # stream_generate added 1 extra generated token to the cache, so we should trim it.
     # Because of needing to roll back arrays cache, we will generate on 2 tokens so trim 1 more.
-    pre_gen = deepcopy(snapshots[-2]) if has_ssm else None
+    pre_gen: CacheSnapshot | None = None
+    if has_ssm:
+        if len(snapshots) >= 2:
+            pre_gen = deepcopy(snapshots[-2])
+        elif snapshots:
+            pre_gen = deepcopy(snapshots[0])
     for i, c in enumerate(cache):
         if has_ssm and isinstance(c, (ArraysCache, RotatingKVCache)):
             assert pre_gen is not None
@@ -876,6 +980,29 @@ def mlx_generate(
         ),
         start=1,
     ):
+        # ── Decode-phase memory management (aligned with oMLX) ──────────
+        # Without periodic sync+clear, intermediate tensors from decode steps
+        # accumulate in Metal memory and can OOM within ~8 tokens on 16GB.
+        if _DECODE_SYNC_INTERVAL > 0 and completion_tokens % _DECODE_SYNC_INTERVAL == 0:
+            mx.synchronize()
+            mx.clear_cache()
+
+        # ── Decode memory safety valve ──────────────────────────────────
+        # After sync+clear, if Metal memory still exceeds the limit, the KV
+        # cache itself is too large.  Force finish_reason="length" to prevent
+        # the next forward pass from OOM-crashing.
+        _decode_memory_exceeded = False
+        if _DECODE_SYNC_INTERVAL > 0 and completion_tokens % _DECODE_SYNC_INTERVAL == 0:
+            _active_gb = mx.get_active_memory() / (1024**3)
+            _limit_gb = _get_metal_memory_limit_gb()
+            if _active_gb > _limit_gb:
+                logger.warning(
+                    f"Decode memory safety valve: {_active_gb:.2f}GB > "
+                    f"{_limit_gb:.2f}GB limit at token {completion_tokens}. "
+                    f"Force-finishing to prevent OOM."
+                )
+                _decode_memory_exceeded = True
+
         generated_text_parts.append(out.text)
         accumulated_text += out.text
 
@@ -891,6 +1018,9 @@ def mlx_generate(
         finish_reason: FinishReason | None = cast(
             FinishReason | None, out.finish_reason
         )
+        # Memory safety valve override
+        if _decode_memory_exceeded and finish_reason is None:
+            finish_reason = "length"
         stop_matched = False
 
         if stop_sequences:

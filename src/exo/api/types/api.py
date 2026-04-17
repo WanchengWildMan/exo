@@ -210,6 +210,7 @@ class ChatCompletionRequest(BaseModel):
     logprobs: bool | None = None
     top_logprobs: int | None = None
     max_tokens: int | None = None
+    max_completion_tokens: int | None = None
     n: int | None = None
     presence_penalty: float | None = None
     response_format: dict[str, Any] | None = None

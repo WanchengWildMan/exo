@@ -1,0 +1,1363 @@
+%%==================================================
+%% chapter04.tex for XMU Graduate Thesis
+%% 基于多智能体强化学习的无人机辅助多模态语义通信网络资源分配
+%% version: 1.0
+%% last update: Nov 11th, 2025
+%%==================================================
+\chapter{基于多智能体强化学习的无人机辅助多模态语义通信网络资源优化}
+\enchapter{Resource Optimization for UAV-Assisted Multimodal Semantic Networks via MARL}
+
+\label{chap:chapter4}
+
+第三章研究了单架无人机辅助的文本语义D2D传输场景。
+然而在实际应用中，移动用户的任务通常涉及图像、音频等多模态数据\supercite{Wang_2024_JEIT_Multimodal}，多模态理解任务需要跨模态融合推理能力，LLM具备该能力，但其推理算力远超移动终端承载上限，因此用户需要将多模态数据传输至部署有LLM的服务设备完成理解任务。
+LLM理解任务关注各模态的语义信息而非逐比特重构，使得对各模态分别提取语义特征并压缩传输成为可能，同时有限的频谱资源也要求减少传输冗余，语义通信技术满足上述两方面需求。
+随着用户数量增多，其分布区域可能超出单架无人机的有效服务距离，需要多架无人机协同中继\supercite{Liu_2023_TWC_Energy}。
+在时序方面，压缩后的多模态数据量仍远大于纯文本，单时隙内可能无法完成传输而产生滞留。
+各用户发起LLM请求的时刻不同步，任务异步到达使传输与处理在时间上交错重叠。
+LLM推理周期较长，一次理解任务可能横跨多个调度时隙并形成计算排队。
+上述因素导致第三章单时隙完成的假设不再成立，而现有方案多针对单一模态且未对跨时隙的传输滞留与计算排队加以建模\supercite{Liu_2024_TWC_Semantic,Hu_2025_TCOM_Resource}。
+
+针对上述问题，本章建立多无人机与地面资源设备协同服务的系统模型，引入跨时隙的传输滞留模型和计算排队模型以描述任务的异步时序特性。
+本章联合优化语义压缩参数、中继选择、无人机轨迹与处理设备分配，以最大化长期任务效用。
+该问题涉及离散取值与连续决策混合，且跨时隙的队列状态转移使当前决策影响后续时隙，具有时序耦合特性。
+传统离线优化方法通常需要预先获取整个长调度周期内的全局信道状态与任务到达信息，在动态网络中难以适用，而深度强化学习的序贯决策能力适合求解此类问题。
+多用户多无人机场景下单智能体动作空间随实体数目急剧扩大\supercite{Zhao_2022_TWC_MultiAgent,Pei_2024_JEIT_Multitask}。
+为了充分利用设备本地的决策能力，并将高维的全局联合优化问题拆解为易于求解的子问题，本章将网络中的实体划分为两类异构智能体：用户智能体负责输出离散任务关联与语义压缩的动作，无人机智能体负责输出飞行控制参数。
+基于上述马尔可夫决策过程模型与智能体结构，本章采用MAPPO算法构建异构策略网络，提出一种协同资源调度方案。
+在该方案中，各智能体通过局部观测与全局信息的交互实现资源分配与轨迹规划的在线协同，同时将频谱分配和中继选择分别以解析方法和启发式策略求解，以降低探索维度。
+
+本章安排如下。第4.1节建立多无人机辅助多模态语义通信网络的系统模型，并完成优化问题建模。第4.2节提出基于异构多智能体强化学习的多模态任务效用优化方案。第4.3节给出仿真设置与实验结果分析。第4.4节对本章进行小结。
+
+\section{系统模型与问题表述}
+\ensection{System Model and Problem Formulation}
+本节首先介绍多无人机辅助多模态语义通信网络的系统模型，随后给出优化问题的数学表述。
+
+\subsection{多无人机辅助多模态语义通信网络模型}
+\ensubsection{Multi-UAV Multimodal Semantic Network Model}
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/sec4/sys-model-chapter4.pdf}
+    \caption{多无人机辅助多模态语义通信网络系统模型图}
+    \label{fig:sec4:sys-model}
+\end{figure*}
+
+%1.1结构和功能
+如图~\ref{fig:sec4:sys-model}所示，本章考虑一个包含$K$个移动用户与$V$个地面资源设备，由$M$架无人机辅助的D2D-语义通信网络。每个地面资源设备以及无人机各部署一个LLM智能体，用以接收移动用户的LLM理解任务，并对其所传输的图像、音频等大量多模态数据完成语义理解后返回文本结果。
+由于网络中存在多种类型的理解任务，LLM智能体分为 $P$ 种类型。
+为了便于后文表达，本小节定义用户集合为$\mathcal{K}\triangleq\{1,2,\ldots,K\}$，地面资源设备集合$\mathcal{V}\triangleq\{1,2,\ldots,V\}$，无人机集合为$\mathcal{M}\triangleq\{1,2,\ldots,M\}$，LLM智能体集合为$\mathcal{P}\triangleq\{1,2,\ldots,P\}$。
+进一步，为便于描述不同的处理设备，定义设备集合$\boldsymbol{\Phi}\triangleq\{1,2,\ldots,M+V\}$，其中$\phi\in\{1,2,\ldots,M\}$表示无人机的索引，$\phi\in\{M+1,M+2,\ldots,M+V\}$表示地面资源设备的索引。
+系统设有一个地面控制中心，通过无人机定期收集网络中的全局状态信息，用于集中式模型训练与网络管控。
+%难点1：没基站怎么传输（SCA）？D2D 怎么传大量数据（QA）？语义通信
+假设移动用户分布在缺乏基站覆盖的远程区域，需要通过D2D直接链路向地面资源设备或无人机传输LLM理解任务中所需的图像和音频等多模态数据。然而，多模态数据的数据量较大，而D2D链路的频谱资源受限，在传统比特通信的高服务质量要求下，难以支撑上述大数据量多模态信息的高通量传输需求。
+
+为解决上述问题，本章网络采用语义通信技术。接收端执行的LLM理解任务关注语义信息而非比特精确重构，且大语言模型对输入内容具有语义鲁棒性，允许存在一定程度的语义信息损失。
+而语义通信技术允许在发送端提取多模态数据的语义特征进行编码传输，接收端基于语义特征恢复任务所需的语义信息。由于只需传输对任务执行有意义的语义特征，语义通信可在相同频谱条件下完成更多数据量的语义信息传输。
+
+%难点2 SCQA：D2D远了怎么办？
+然而，D2D链路的设备发射功率受限，且信号随距离衰减，远距离传输时难以保证D2D语义传输的质量。因此，引入多无人机作为空中中继协助D2D通信。
+%无人机中继是干什么？
+无人机配备有高性能解码转发（Decode-and-Forward，DF）中继设备，接收来自移动用户的任务数据，经解码处理后重新编码转发给目标设备，同时配备有智能控制器以管理网络资源。
+
+%1.2运行机制：分析交互过程？什么难点-总体上怎么简化，简化为什么有效 SQA
+考虑到网络状态随时间持续变化，将时间划分为离散时隙以便于分析。
+网络设单个时隙长度为$\delta_t$，为保证无人机与移动用户在每个时隙内的相对位置保持不变，单个时隙的长度足够小。定义网络的时隙集合为
+$\mathcal{N}\triangleq\{1,2,\ldots,n,\ldots,N\}$。
+移动用户$k$在时隙$n$的位置为
+${\bf g}_k[n]=\big[x_k^{\rm MU}[n],\,y_k^{\rm MU}[n],\,0\big]^{\text{T}}$，
+地面资源设备$v$在时隙$n$的位置为：
+$\tilde{\bf g}_v[n]=\big[\tilde{x}_v[n],\,\tilde{y}_v[n],\,\tilde{z}_v[n]\big]^{\text{T}}$，无人机以高度$H$飞行，其在时隙$n$的位置为
+${\bf q}_m[n]=\big[x_{m}[n],\,y_{m}[n],\,H\big]^{\text{T}}$。
+本章移动用户的移动模型采用文献\cite{Liu_2020_TVT_Path}中的高斯-马尔可夫模型，则移动用户$k$在时隙$n$的速度$v_k[n]$与方向角度 $\theta_k[n]$表述如下：
+\begin{align}
+v_k[n] &= \mu_1 v_k[n-1] + (1- \mu_1)\bar s_k + \sqrt{1 - \mu_1^2}\,\Phi_k, \\
+\theta_k[n] &= \mu_2 \theta_k[n-1] + (1- \mu_2)\bar \theta_k + \sqrt{1- \mu_2^2}\,\Psi_k,
+\end{align}
+其中，$\bar s_k$与$\bar \theta_k$分别为移动用户的平均速度与平均方向角度，$0\le \mu_1,\mu_2\le 1$表示上一时隙对当前时隙的影响。
+$\Phi_k,\Psi_k$服从高斯分布，其均值与方差分别为$(\bar \xi_{v_k}, \zeta_{v_k}^2)$与$(\bar \xi_{\theta_k}, \zeta_{\theta_k}^2)$。故，移动用户$k$的位置根据下式更新：
+\begin{align}
+x_k^{\rm MU}[n] &= x_k^{\rm MU}[n-1] + v_k[n-1]\cos(\theta_k[n-1])\,\delta_t, \\
+y_k^{\rm MU}[n] &= y_k^{\rm MU}[n-1] + v_k[n-1]\sin(\theta_k[n-1])\,\delta_t.
+\end{align}
+
+无人机受最大速度与最大加速度约束，其运动模型为
+\begin{align}
+\|\mathbf{v}_m[n]\| &\leq V_{\max}, \qquad \|\mathbf{a}_m[n]\| \leq A_{\max},\label{eq:va}\\
+{\bf q}_m[n] &= {\bf q}_m[n-1] + {\bf v}_m[n] \delta_t + \tfrac{1}{2} {\bf a}_m[n] \delta_t^2,\label{eq:q}\\
+{\bf v}_m[n] &= {\bf v}_m[n-1] + {\bf a}_m[n] \delta_t.\label{eq:v}
+\end{align}
+其中，$\|\cdot\|$ 为欧氏范数，$V_{\max}$、$A_{\max}$分别为无人机的最大速度与最大加速度。
+
+
+\subsection{空地协同传输模型}
+\ensubsection{Air-Ground Cooperative Transmission Model}
+% 总体概述=过程分类+关注指标（产物）+实现方式
+所提出的网络中LLM理解任务的通信方式可分为直接链路与中继链路两种模式。
+直接链路指用户直接将任务数据传输至目标设备，包括用户到无人机和用户到地面资源设备两种方式。在直接链路模式下数据经单跳传输。
+中继链路指任务经由无人机中继后转发至地面资源设备，经过用户到无人机和无人机到地面资源设备两段链路。
+下面分别建立直接链路和中继链路的数学模型。
+
+\subsubsection{D2D通信模型}
+\ensubsubsection{D2D Communication Model}
+用户 $k$ 与地面资源设备 $v$ 在时隙 $n$ 的信道增益可表示为
+\begin{equation}
+h_{k,v}[n]=\beta_{0}\,d_{k,v}[n]^{-\alpha_1},
+\end{equation}
+其中，$\beta_0$为参考距离1米处的信道增益，$d_{k,v}[n]=\|{\bf g}_k[n]-\tilde{\bf g}_v[n]\|$为用户$k$与地面资源设备$v$之间的距离，$\alpha_1$为路径损耗指数。
+定义二元变量 $\beta_{k,v}[n]$ 表示时隙 $n$ 中用户 $k$ 是否选择地面资源设备 $v$ 作为 D2D 接收端。若选择地面资源设备$v$则 $\beta_{k,v}[n]=1$，否则为 $0$。用户 $k$ 对应的地面资源设备索引为
+\begin{equation}
+\hat{\beta }_k[n]=\arg\max_{v}\,\beta_{k,v}[n].
+\end{equation}
+为保证每个用户在单个时隙内至多选择一个地面资源设备，其约束为
+\begin{equation}\label{C:betaleq1}
+\sum_{v=1}^{V}\beta_{k,v}[n]\le 1,\quad \forall k\in\mathcal{K}, v\in\mathcal{V},\, n\in\mathcal{N}.
+\end{equation}
+因此，接收端 $\hat{\beta}_k$在时隙 $n$ 内的接收信号为
+\begin{align}
+\mathbf{y}_{{\hat \beta}_k}^{\text{D2D}}[n]=\;&\sqrt{p_k[n]\,h_{k,{\hat{\beta }_k}}[n]}\,{\mathbf{x}}_k[n]\nonumber+\mathbf{z},
+\end{align}
+其中，$p_k[n]$为用户$k$在时隙$n$的发射功率。$\mathbf{z}$为加性高斯白噪声，其功率$\sigma^2 = N_0 W_k[n]$，$N_0$为单边噪声功率谱密度。对应的信噪比（Signal-to-Noise Ratio，SNR）为
+\begin{equation}
+\gamma_k^{\text{D2D}}[n]=\frac{p_k[n]\,h_{k,{\hat{\beta}_k}}[n]}{\sigma^{2}}.
+\end{equation}
+根据香农公式，用户 $k$ 到地面资源设备 $v$ 在时隙 $n$ 的D2D传输速率为
+\begin{equation}
+r_{k,v}[n] = W_k[n] \log_2 \left(1 + \gamma_k^{\text{D2D}}[n]\right),
+\end{equation}
+其中，$W_k[n]$为分配给用户$k$的通信带宽。设备$\phi$对其服务的所有用户进行带宽分配时需满足带宽约束$\sum_{k \in \mathcal{K}_\phi} W_k[n] \le W_\phi^{\max}$，其中 $\mathcal{K}_\phi$ 为设备 $\phi$ 服务的用户集合，$W_\phi^{\max}$ 为设备 $\phi$ 的最大可用带宽。
+系统采用正交频分多址接入（Orthogonal Frequency-Division Multiple Access，OFDMA）技术\supercite{Zeng_2021_TWC_Trajectory}，不同用户占用正交子载波，不存在同信道干扰。
+由于考虑采用OFDMA技术消除了同信道干扰，发射功率的增大单调提升传输速率，各用户直接以最大功率$P_k^{\max}$发射，即$p_k[n]=P_k^{\max}$。
+地面资源设备$v$在统一设备集合$\boldsymbol{\Phi}$中对应的索引为$\phi=M+v$。
+用户$k$选择地面资源设备$v$时，其目标设备索引为$\phi_k^{\text{target}}[n]=M+\hat{\beta}_k[n]$。
+
+\subsubsection{无人机中继通信模型}
+\ensubsubsection{UAV-Assisted Relay Communication Model}
+无人机$m$与用户$k$采用空地传播路径损耗模型，其几何LoS概率为 
+\begin{equation} 
+{\Pr}^{\rm LoS}_{k,m}[n]=\frac{1}{1+a\exp\big(-b(\vartheta_k^m[n]-a)\big)}, 
+\end{equation} 
+其中，$a,b$为与环境有关的常量，仰角由下式给出
+\begin{equation} 
+\vartheta_k^m[n]=\frac{180}{\pi}\arcsin\!\left(\frac{H}{d_k^m[n]}\right),\qquad d_k^m[n]=\|{\bf g}_k[n]-{\bf q}_m[n]\|. 
+\end{equation} 
+并有 ${\Pr}^{\rm NLoS}_{k,m}[n]=1-{\Pr}^{\rm LoS}_{k,m}[n]$。
+则 无人机 中继链路的等效增益为 
+\begin{equation} 
+h_{k,m}[n]=\frac{1}{{\Pr}^{\rm LoS}_{k,m}[n]{\rm PL}_{k,m}^{\rm LoS}[n]+{\Pr}^{\rm NLoS}_{k,m}[n]{\rm PL}_{k,m}^{\rm NLoS}[n]}, 
+\end{equation} 
+其中，
+\begin{equation} 
+{\rm PL}_{k,m}^{\varpi }[n]=\eta^\varpi\left(\frac{\lambda}{4\pi d_k^m[n]}\right)^{-\alpha_2},\quad \varpi\in\{\rm LoS,NLoS\}, 
+\end{equation} 
+其中，$\eta^\varpi$ 为额外损耗常数，$\alpha_2$ 为中继链路路径损耗指数。定义中继决策变量$\alpha_k[n]\in\{0,1\}$，其中$\alpha_k[n]=1$表示用户$k$在时隙$n$选择经无人机中继传输，$\alpha_k[n]=0$表示直接传输。定义中继无人机索引$m_k^{\text{relay}}[n]\in\{0\}\cup\mathcal{M}$，两者满足
+\begin{equation}
+(1-\alpha_k[n])\, m_k^{\text{relay}}[n] = 0,
+\end{equation}
+即当$\alpha_k[n]=0$时$m_k^{\text{relay}}[n]=0$，当$\alpha_k[n]=1$时$m_k^{\text{relay}}[n]\in\{1,...,M\}$指定所选中继无人机。
+% 为限制 无人机 的负载能力，每个 无人机 在任意时隙内最多可同时服务 $l_{\max}$ 条链路，即
+% \begin{equation}\label{C:alphaleqlmax}
+% \sum_{k=1}^{K}\alpha_{k,m}[n]\le l_{\max},\quad \forall m\in\mathcal{M},~n\in\mathcal{N}.
+% \end{equation}
+无人机 $m$ 从用户 $k$ 接收到的信号为
+\begin{equation}
+\mathbf{y}_k^{\text{UAV-rx}}[n]=\sqrt{p_k[n]\,h_{k,m}[n]}\,{\mathbf{x}}_k[n]+\mathbf{z},
+\end{equation}
+其中，$p_k[n]$为用户$k$的发射功率，$\mathbf{x}_k[n]$为其发送信号，$\mathbf{z}$为零均值、方差为$\sigma^2$的加性高斯白噪声。
+对应的 无人机 接收端SNR为
+\begin{equation}
+\gamma _{k,m}^{\text{UAV-rx}}[n]=\frac{p_k[n]\,h_{k,m}[n]}{\sigma^{2}}.
+\end{equation}
+
+考虑系统采用半双工模式下的DF中继协议。无人机首先对接收信号进行解码，恢复原始信息，然后重新编码并转发给目标设备。当无人机成功解码时，地面资源设备 $\hat{\beta}_k$ 从 无人机 $m$ 接收到的信号为
+\begin{equation}
+\mathbf{y}_{\hat\beta_k}^{\text{UAV-tx}}[n]=\sqrt{P_{m}^{\text{tx}}[n]\,h_{\hat\beta_k,m}[n]}\,\hat{\mathbf{x}}_k[n]+\mathbf{z},
+\end{equation}
+其中，$P_{m}^{\text{tx}}[n]$ 为 无人机 $m$ 在时隙 $n$ 的转发功率，$\hat{\mathbf{x}}_k[n]$ 为无人机解码后重新编码的信号。
+对于DF中继，端到端传输的等效信噪比受限于两跳链路中的较弱环节：
+\begin{equation}
+\gamma_k^{\rm rel}[n]=\min\left\{\gamma_{k,m_k^{\text{relay}}}^{\text{UAV-rx}}[n],\,\gamma_{\hat\beta_k,m_k^{\text{relay}}}^{\text{UAV-tx}}[n]\right\},
+\end{equation}
+其中，$m_k^{\text{relay}}[n]$为用户$k$选择的中继无人机索引，无人机至地面资源设备的SNR为
+\begin{equation}
+\gamma_{\hat\beta_k,m}^{\text{UAV-tx}}[n]=\frac{P_{m}^{\text{tx}}[n]\,h_{\hat\beta_k,m}[n]}{\sigma^{2}}.
+\end{equation}
+结合是否启用中继的决策，用户$k$与其接收端的总体SNR为
+\begin{equation}\label{eq:snr_total}
+\gamma_k[n]=(1-\alpha_k[n])\,\gamma _k^{\text{D2D}}[n]+\alpha_k[n]\,\gamma _k^{\text{rel}}[n],
+\end{equation}
+根据香农公式，用户$k$至无人机$m$以及无人机$m$至地面资源设备$v$的各跳传输速率分别为
+\begin{equation}
+r_{k,m}[n] = W_{k,m}[n] \log_2\!\big(1 + \gamma_{k,m}^{\text{UAV-rx}}[n]\big),
+\end{equation}
+\begin{equation}
+r_{m,v}[n] = W_{m,v}[n] \log_2\!\big(1 + \gamma_{\hat\beta_k,m}^{\text{UAV-tx}}[n]\big),
+\end{equation}
+其中，$W_{k,m}[n]$和$W_{m,v}[n]$分别表示分配给用户至无人机和无人机至地面资源设备链路的带宽。用户$k$经无人机$m$中继至地面资源设备$v$的等效传输速率为
+\begin{equation}
+r_{k,m,v}^{\text{rel}}[n] = \frac{1}{2}\min\!\big(r_{k,m}[n],\, r_{m,v}[n]\big),
+\end{equation}
+结合中继选择决策$\alpha_k[n]$，用户$k$在时隙$n$的等效传输速率为
+\begin{equation}\label{eq:r_k}
+r_k[n] = (1-\alpha_k[n])\, r_{k,\phi_k^{\text{target}}}[n] + \alpha_k[n]\, r_{k,m_k^{\text{relay}},\hat\beta_k}^{\text{rel}}[n].
+\end{equation}
+
+对于无人机 $m$，其需同时承担用户到无人机和无人机到地面资源设备的传输带宽需求，其约束为
+\begin{equation}
+\sum_{k=1}^{K} W_{k,m}[n] + \sum_{v=1}^{V} W_{m,v}[n] \le W_{m}^{\max},
+\end{equation}
+其中，$W_{m}^{\max}$为无人机$m$的最大可用带宽。
+对于地面资源设备 $v$，其需同时承担用户到地面资源设备和无人机到地面资源设备的带宽需求，约束为
+\begin{equation}
+\sum_{k=1}^{K} W_{k,v}[n] + \sum_{m=1}^{M} W_{m,v}[n] \le W_{v}^{\max},
+\end{equation}
+其中，$W_{v}^{\max}$为地面资源设备$v$的最大可用带宽。
+
+
+\subsection{基于脉冲神经网络的语义编码-解码模型}
+\ensubsection{Spiking Neural Network-Based Semantic Encoder–Decoder Model}
+用户的多模态数据经语义编码器提取关键语义特征后，通过物理信道传输至目标设备，由接收端的语义解码器恢复语义信息并执行LLM理解任务。
+
+\subsubsection{基于脉冲神经网络的语义编解码器}
+\ensubsubsection{Spiking Neural Network-Based Semantic Encoder–Decoder}
+传统浮点神经网络构建的语义通信框架计算开销较大，若部署在无人机、移动用户等计算资源与能耗均受限的边缘设备上，通常会带来较高的能耗。
+脉冲神经网络（Spiking Neural Networks, SNNs）利用脉冲激活函数把连续数据编码成离散脉冲序列，按事件驱动的方式进行稀疏计算。
+随着神经形态计算硬件的快速发展，SNN有望在下一代低功耗智能芯片上运行，能效高、功耗低，适合部署在移动设备上\supercite{rathi2023exploring,basu2022spiking}。同时，脉冲神经元具有固有的噪声鲁棒性\supercite{xu2024feel}，且SNN在多个时间步上对传输结果取均值，有助于抑制信道噪声对语义恢复的影响，因而本章考虑采用SNN构建语义编解码器。
+
+如图\ref{fig:snn_codec}所示，本章设计的语义编解码模型由编码器、信道传输和解码器三个模块组成。
+用户的多模态数据首先经归一化预处理后进入泊松编码器，转换为二值脉冲序列$\{\mathbf{s}^{(t)}\}_{t=1}^{T}$。
+脉冲序列经语义编码器$f_{\text{enc}}(\cdot)$提取关键语义特征后，经调制映射为信道符号并通过物理信道$f_{\text{ch}}(\cdot)$传输至接收端，传输过程中受加性高斯白噪声干扰。
+接收端解调后恢复脉冲特征，语义解码器$f_{\text{dec}}(\cdot)$根据接收信号恢复原始数据。
+经过$T$个时间步的平均累积后，得到重构的多模态数据$\hat{\mathbf{x}}$，供资源设备或无人机执行LLM理解任务。
+
+编码器采用多层脉冲卷积神经网络结构，由若干卷积块级联构成。
+每个卷积块包含三个卷积层、批归一化层和残差连接，卷积块之间通过池化层逐步缩小特征图尺寸并增加通道数，以提取不同尺度的语义特征。
+编码器在每两个池化层后采用积分发放（Integrate-and-Fire, IF）神经元产生脉冲输出，将连续特征$\mathbf{f}_\text{cont}$转换为离散脉冲序列表示$\mathbf{f}_\text{spike}$。
+
+解码器采用与编码器对称的结构，通过多层转置卷积逐步恢复编码后的语义信息。每个反卷积块包含两个转置卷积层、批归一化层和残差连接，最终输出与原始输入相同格式的重建数据$\hat{\mathbf{x}}$。
+
+\begin{figure}[htb]
+\centering
+\includegraphics[width=1\textwidth, trim=4pt 4pt 4pt 4pt, clip]{figures/sec4/snn_semcom.pdf}
+\caption{基于脉冲神经网络的多模态语义编解码器架构}
+\label{fig:snn_codec}
+\end{figure}
+
+编码端使用泊松编码器把原始多模态数据转换为离散脉冲序列。编码过程利用脉冲激活函数来模拟生物神经元的脉冲发放特性。设输入数据像素值为$x\in[0,1]$，则在每个时间步$t$以概率$x$产生脉冲输出$1$，否则输出$0$，即
+\begin{equation}
+\mathbf{s}^{(t)} = \begin{cases} 1, & \text{以概率} x \\ 0, & \text{以概率} 1-x \end{cases},
+\end{equation}
+其中，$\mathbf{s}^{(t)} \in \{0,1\}$为离散脉冲符号，$\mathbf{s}^{(t)}=1$表示该时间步产生脉冲，$\mathbf{s}^{(t)}=0$表示无脉冲。通过这种二值化编码，连续信息被转换为离散脉冲序列$\{\mathbf{s}^{(t)}\}_{t=1}^{T}$，可以大幅度降低存储和传输的成本。
+
+模型在$T$个时间步上对脉冲序列进行累积处理。编码器在每个时间步$t\in\{1,\ldots,T\}$独立进行泊松编码并前向传播脉冲序列，最终的数据重建通过对$T$个时间步的平均进行
+\begin{equation}
+\hat{\mathbf{x}} = \frac{1}{T}\sum_{t=1}^{T} f_{\text{dec}}\big(f_{\text{ch}}(f_{\text{enc}}(\mathbf{s}^{(t)}))\big),
+\end{equation}
+其中，$\mathbf{s}^{(t)}$为第$t$个时间步的离散脉冲序列，$f_{\text{enc}}$、$f_{\text{ch}}$、$f_{\text{dec}}$分别表示编码器、信道传输和解码器的非线性映射函数。
+SNN推理的时间步数$T$即系统模型中各用户各模态的语义符号数$T_{k,i}[n]$。
+$T_{k,i}[n]$越大，累积的脉冲信息越丰富，语义恢复质量$\xi_{k,i}$越高，但传输的脉冲数据量也增加。
+反之，$T_{k,i}[n]$越小，压缩程度越高，但可能导致语义信息损失。
+
+\subsubsection{语义压缩模型}\label{sec:semantic_encoding}
+\ensubsubsection{Semantic Compression Model}
+用户$k$的任务数据包含$I$个模态（如图像、音频等）。针对模态$i\in\{1,\ldots,I\}$，用户在时隙$n$选择语义符号数$T_{k,i}[n]\in[T_i^{\min},T_i^{\max}]$，通过多层卷积编码器将原始数据编码为语义特征。模态 $i$ 的语义压缩率定义为
+\begin{equation}
+\varsigma_{k,i}(T_{k,i}) = \frac{T_{k,i}}{L_i},
+\end{equation}
+其中，$L_i$ 为模态 $i$ 的压缩基数，由编码器结构与模态类型决定。
+
+经语义压缩后，用户 $k$ 在时隙 $n$ 实际传输的数据量为
+\begin{equation}\label{eq:d_comp}
+d_{k}^{\text{comp}}[n] = \sum_{i\in\mathcal{I}(\tau_k)}\varsigma_{k,i}(T_{k,i})\, d_{k,i}^{\text{orig}}[n],
+\end{equation}
+
+语义压缩减少的是传输阶段的数据量，而接收设备执行LLM推理的计算负载由原始数据量决定，与压缩率无关。因此，设备$\phi$在时隙$n$的计算负载为
+\begin{equation}
+L_{\phi}[n] = \sum_{k \in \mathcal{K}_\phi^{\text{comp}}[n]} d_{k}^{\text{orig}}[n],
+\end{equation}
+其中，$\mathcal{K}_\phi^{\text{comp}}[n]$为在设备$\phi$上处于计算阶段的任务集合。
+
+
+\subsubsection{SNN语义通信模型训练}
+\ensubsubsection{Training of SNN Semantic Communication Model}
+本章为图像和音频两种模态分别训练独立的SNN语义编解码器，两个模型采用相同的网络架构但使用不同的超参数配置。训练目标为最小化重建数据与原始数据之间的均方误差（Mean Squared Error, MSE），损失函数定义为
+\begin{equation}
+\mathcal{L}_{\text{rec}} = \frac{1}{N_b}\sum_{j=1}^{N_b}\left\|\hat{\mathbf{x}}_j - \mathbf{x}_j\right\|_2^2,
+\end{equation}
+其中，$N_b$为小批量样本数，$\mathbf{x}_j$为原始数据，$\hat{\mathbf{x}}_j$为经编码器、信道和解码器后重建的数据。
+
+训练采用端到端的方式，在每次前向传播中执行$T$个时间步的脉冲累积。
+每个训练步骤中，原始数据首先归一化至$[0,1]$区间，随后在每个时间步$t\in\{1,\ldots,T\}$由泊松编码器进行随机脉冲编码，编码器提取语义特征并经信道传输，解码器输出当前时间步的重建结果。
+$T$个时间步的重建结果取平均后计算MSE损失，通过反向传播更新网络参数，并调用网络状态重置操作清除SNN神经元的膜电位累积状态，以确保各样本之间的训练相互独立。
+上述训练流程总结于算法~\ref{sec4:alg_snn_train}。
+
+\begin{algorithm}[!ht]
+\caption{SNN语义编解码器端到端训练}
+\label{sec4:alg_snn_train}
+\begin{algorithmic}[1]
+\STATE \textbf{输入：}训练数据集$\mathcal{D}$，时间步数$T$，训练信噪比$\text{SNR}_{\text{train}}$，总迭代次数$E$
+\STATE 初始化编码器$f_{\text{enc}}$和解码器$f_{\text{dec}}$的网络参数$\boldsymbol{\Theta}$
+\FOR{迭代 $e = 1$ \TO $E$}
+    \STATE 从$\mathcal{D}$采样小批量$\{\mathbf{x}_j\}_{j=1}^{N_b}$，归一化至$[0,1]$
+    \STATE 初始化累积输出$\hat{\mathbf{x}}_j \leftarrow \mathbf{0}$
+    \FOR{$t = 1$ \TO $T$}
+        \STATE $\mathbf{s}_j^{(t)} \leftarrow \text{PoissonEncode}(\mathbf{x}_j)$ \COMMENT{泊松编码生成脉冲}
+        \STATE $\mathbf{f}_j^{(t)} \leftarrow f_{\text{enc}}(\mathbf{s}_j^{(t)})$ \COMMENT{编码器提取语义特征}
+        \STATE $\tilde{\mathbf{f}}_j^{(t)} \leftarrow \mathbf{f}_j^{(t)} + \mathbf{w}^{(t)}$，$\mathbf{w}^{(t)} \sim \mathcal{N}(0, \sigma_{\text{ch}}^2)$ \COMMENT{信道噪声注入}
+        \STATE $\hat{\mathbf{x}}_j \leftarrow \hat{\mathbf{x}}_j + f_{\text{dec}}(\tilde{\mathbf{f}}_j^{(t)})$
+    \ENDFOR
+    \STATE $\hat{\mathbf{x}}_j \leftarrow \hat{\mathbf{x}}_j \,/\, T$ \COMMENT{时间步平均}
+    \STATE 计算损失$\mathcal{L}_{\text{rec}} \leftarrow \frac{1}{N_b}\sum_j\|\hat{\mathbf{x}}_j - \mathbf{x}_j\|_2^2$
+    \STATE 反向传播$\nabla_{\boldsymbol{\Theta}}\mathcal{L}_{\text{rec}}$，更新参数$\boldsymbol{\Theta}$
+    \STATE 重置SNN网络状态（清除神经元膜电位） \COMMENT{\texttt{functional.reset\_net}}
+\ENDFOR
+\STATE \textbf{输出：}训练完成的编解码器参数$\boldsymbol{\Theta}^*$
+\end{algorithmic}
+\end{algorithm}
+
+算法中信道噪声的方差$\sigma_{\text{ch}}^2$由训练信噪比$\text{SNR}_{\rm train}$决定，训练时采用固定的信噪比条件。训练完成后，模型在不同信噪比下的推理性能通过语义相似度评价模型进行离线标定。图像模型和音频模型分别在对应模态的数据上独立完成上述端到端训练过程。
+
+
+\subsubsection{语义相似度评价模型}
+\ensubsubsection{Semantic Similarity Measurement Model}
+语义相似度$\xi_k \in [0,1]$衡量语义信息的恢复质量。
+由于语义相似度难以直接度量，本章沿用第\ref{chap:resource_allocation}章的建模思路\supercite{Hu_2025_TCOM_Resource}，以分类准确率作为代理指标间接评估语义恢复质量。
+具体而言，在训练好的SNN语义编解码器基础上，利用经语义传输后重建的图像和音频数据训练下游分类模型，在不同信噪比$\text{SNR}_k^{\text{dB}}$与语义符号数$T_{k,i}$条件下采集分类准确率，以此量化不同通信条件对语义信息保留程度的影响。
+
+与第\ref{chap:resource_allocation}章采用相同的Logistic函数形式对分类准确率进行参数化拟合，可得语义相似度模型
+\begin{equation}\label{eq:xi_fit}
+\xi_{k,i}(\text{SNR}_k,T_{k,i}) = A_1^{T_{k,i}} + \frac{A_2^{T_{k,i}}-A_1^{T_{k,i}}}{1+\exp\!\left[-(C_1^{T_{k,i}}\text{SNR}_k^{\text{dB}} + C_2^{T_{k,i}})\right]},
+\end{equation}
+其中，$A_1^{T_{k,i}}$、$A_2^{T_{k,i}}$、$C_1^{T_{k,i}}$、$C_2^{T_{k,i}}$为关于语义符号数$T_{k,i}$的拟合参数，由最小二乘法对实测数据进行拟合获得。
+$\text{SNR}_k^{\text{dB}}=10\lg(\gamma_k[n])$为以分贝表示的接收信噪比，其中$\gamma_k[n]$由通信模型中式\eqref{eq:snr_total}给出。
+该拟合模型将分类准确率对SNR的依赖关系参数化，避免在系统仿真中进行逐点查表。拟合参数的具体取值及拟合效果将在仿真结果部分给出。
+综合压缩率$\varsigma_{k,i} = T_{k,i}/L_i$与语义相似度$\xi_{k,i}(\text{SNR}_k, T_{k,i})$的定义，语义符号数$T_{k,i}$同时控制传输数据量$d_k^{\text{comp}}$和语义恢复质量$\xi_{k,i}$。
+
+
+\subsection{LLM理解任务传输与处理模型}
+\ensubsection{LLM Task Transmission and Processing Model}
+\subsubsection{任务生成模型}
+\ensubsubsection{LLM-Based Task Generation Model}
+%生成：条件=时机+位置+方式+产物（结果）
+用户采集到多模态数据后，会在本地预处理数据并生成某类型的LLM理解任务。在时隙开始时向资源设备和无人机发起处理请求，且请求的目标设备需部署对应类型的LLM智能体。
+考虑到用户在使用LLM应用时通常在同一个对话中进行交互，网络中每个用户同一时刻最多持有一个活跃任务。
+为描述用户是否正在处理任务，引入状态标记$s_k[n]\in\{0,1\}$，其中$s_k[n]=0$表示空闲，$s_k[n]=1$表示当前任务尚未完成，处于任务滞留状态。
+每个用户$k\in\mathcal{K}$在时隙 $n$开始时以概率$p_k^{\text{arr}}\in[0,1]$发起请求。
+为便于描述该随机行为，引入伯努利随机变量 $u_k[n]\sim\mathrm{Bernoulli}(p_k^{\text{arr}})$。
+当$s_k[n]=0$且$u_k[n]=1$时，用户$k$在该时隙发起请求并生成一个新任务。若$s_k[n]=1$，则用户当前任务尚未完成，不产生新任务。
+当用户$k$在时隙$n$发起请求时，生成的任务记为 $\mathcal{T}_k[n]=\{\rho_k[n],\tau_k[n],\{d_{k,i}^{\text{orig}}[n]\}_{i\in\mathcal{I}(\tau_k)}, \xi_k^{\text{req}}[n]\}$，其中任务的信息包含任务类型$\rho_k[n]\in\{1,2,\ldots,P\}$、模态类型$\tau_k[n]$、各模态原始数据量$d_{k,i}^{\text{orig}}[n]$以及语义相似度要求$\xi_k^{\text{req}}[n]\in[\xi_{\min}^{\text{req}},\xi_{\max}^{\text{req}}]$。
+设模态索引集合为$\mathcal{I}=\{\text{image},\text{audio}\}$，对于任务$k$，其有效模态集合$\mathcal{I}(\tau_k[n])\subseteq\mathcal{I}$由模态类型$\tau_k[n]$决定。
+
+任务的模态类型$\tau_k[n]$以概率$p_{\text{multi}}$生成为包含图像与音频的多模态任务，以概率$1-p_{\text{multi}}$生成为仅含图像的单模态任务。
+单模态任务的有效模态集合为$\mathcal{I}(\tau_k)=\{\text{image}\}$，多模态任务为$\mathcal{I}(\tau_k)=\{\text{image},\text{audio}\}$。
+各模态原始数据量$d_{k,i}^{\text{orig}}[n]$由模态类型确定：图像模态固定为$d_{\text{image}}$，音频模态在多模态任务中为$d_{\text{audio}}$、在单模态任务中为$0$。任务的总原始数据量为
+\begin{equation}
+d_k^{\text{orig}}[n] = \sum_{i\in\mathcal{I}(\tau_k)} d_{k,i}^{\text{orig}}[n].
+\end{equation}
+
+用户通过语义通信传输任务数据。经语义编码后，任务实际传输数据量$d_k^{\text{comp}}[n]$由式\eqref{eq:d_comp}给出，语义压缩率$\varsigma_{k,i}$和压缩基数$L_i$的定义见第~\ref{sec:semantic_encoding}~节。
+
+
+\subsubsection{任务传输与跨时隙状态转移模型}
+\ensubsubsection{Task Transmission and Cross-Slot State Transition Model}
+由于用户任务的到达时刻与数据规模各异，传输任务在现实场景需异步进行，因而在所研究的模型中可能跨越多个时隙。同时，LLM推理任务的计算量通常大于传统移动边缘计算中的分类或检测任务，在设备处理容量有限的条件下，计算过程同样可能跨越多个时隙。若将所有任务假定在单时隙内完成，难以反映上述异步过程。为更完整地描述任务从生成到完成的状态变化，本节建立跨时隙传输状态转移模型。
+
+系统初始时刻，所有用户处于无任务滞留状态，即$s_k[1]=0$，$d_k^{\text{res}}[1]=0$，$\forall k\in\mathcal{K}$。
+任务 $\mathcal{T}_{k}[n]$ 在生成后需分配并传输至一个已部署同类型智能体的目标处理设备 $\phi_{k}^{\text{target}}[n]\in\boldsymbol{\Phi}$。
+为确保处理任务的LLM智能体与任务类型相匹配，设备$\phi$必须部署了与任务类型相同的智能体，即目标设备上的LLM智能体类型$\mathcal{T}_{\text{agent}}(\phi_{k}^{\text{target}}[n])$应等于用户$k$在时隙$n$生成的任务类型$\rho_k[n]$，即
+\begin{equation}
+\mathcal{T}_{\text{agent}}(\phi_{k}^{\text{target}}[n]) = \rho_k[n], \quad \rho_k[n] \in \{1,2,\ldots,P\}.
+\end{equation}
+% 传输的前提条件-依据任务状态判断
+当用户上一时隙传输或生成的任务数据尚未传输完成，记其为任务滞留状态$s_{k}[n]=1$，需要继续传输上一时隙剩余的数据$d_{k}^{\text{res}}[n]$。
+未传输完成任务所分配的目标设备保持不变，即 $\phi_{k}^{\text{target}}[n]=\phi_{k}^{\text{target}}[n-1]$。
+若上一个任务传输完成，用户处于无任务滞留状态$s_{k}[n]=0$，此时传输当前生成的新任务经语义压缩后的数据$d_{k}^{\text{comp}}[n]$。
+因此，在时隙$n$内，用户$k$的待传输数据量为：
+\begin{equation}
+d_{k}^{\text{pending}}[n]=
+\begin{cases}
+d_{k}^{\text{res}}[n], & s_{k}[n]=1,\\[3pt]
+d_{k}^{\text{comp}}[n], & s_{k}[n]=0.
+\end{cases}.
+\end{equation}
+
+用户$k$在时隙$n$的传输时延由等效传输速率$r_k[n]$决定：
+\begin{equation}\label{eq:t_trans}
+t_k^{\text{trans}}[n] = \frac{d_{k}^{\text{pending}}[n]}{r_k[n]},
+\end{equation}
+其中，$r_k[n]$为式\eqref{eq:r_k}定义的等效传输速率。在时隙长度$\delta_t$内，用户$k$可完成的数据传输量为$\Delta d_{k}[n] = r_k[n]\,\delta_t$，
+剩余数据量按下式更新：
+\begin{equation}\label{eq:residual_data}
+d_{k}^{\text{res}}[n+1] = \max\!\big(0,\; d_{k}^{\text{pending}}[n] - r_k[n]\,\delta_t\big).
+\end{equation}
+若$d_{k}^{\text{res}}[n+1]=0$，则任务传输完成，进入目标设备的计算阶段。由于设备可能同时处理多个任务，计算队列可能尚未完成，用户状态在此期间仍保持$s_k[n+1]=1$，直到计算全部完成后才更新为$s_k[n]=0$，具体规则将在第\ref{sec:task_processing}节给出。
+若$d_{k}^{\text{res}}[n+1]>0$，则任务需在后续时隙继续传输，用户状态保持为$s_{k}[n+1]=1$，目标设备不变$\phi_{k}^{\text{target}}[n+1]=\phi_{k}^{\text{target}}[n]$。
+为衡量任务在系统中的累计等待时间，定义滞留时隙计数$t_k^{\text{stay}}$，其更新规则为
+\begin{equation}\label{eq:t_stay}
+t_k^{\text{stay}}[n+1]=
+\begin{cases}
+t_k^{\text{stay}}[n]+1, & s_k[n+1]=1,\\[3pt]
+0, & s_k[n+1]=0.
+\end{cases}.
+\end{equation}
+该计数从任务进入滞留状态起累积，在任务完成后清零。当任务传输跨越多个时隙时，$t_k^{\text{stay}}[n]$随时隙递增；当任务在计算阶段等待处理时，$t_k^{\text{stay}}[n]$也继续累加。跨时隙传输模型通过$s_k[n]$、$d_k^{\text{res}}[n]$和$t_k^{\text{stay}}[n]$三个状态变量描述了任务在传输阶段的滞留、续传和等待过程。
+
+
+\subsubsection{任务处理模型}\label{sec:task_processing}
+\ensubsubsection{Task Processing Model}
+设备$\phi\in\boldsymbol{\Phi}$配备GPU资源，其计算能力由GPU算力$f_\phi$（TFLOPS）、显存容量$M_\phi^{\text{GPU}}$以及功耗$P_\phi^{\text{GPU}}$三项指标表示。任务$k$在时隙$n$的计算量由各模态原始数据量确定：
+\begin{equation}
+\Lambda_k[n] = \sum_{i\in\mathcal{I}(\tau_k)} d_{k,i}^{\text{orig}}[n] \cdot \kappa_i,
+\end{equation}
+其中，$\kappa_i$为模态$i$的计算强度系数（GFLOPs/MB）。当设备$\phi$同时处理多个任务时，采用处理器共享模型分配算力。设$N_\phi[n] = |\mathcal{K}_\phi^{\text{comp}}[n]|$为设备$\phi$上的并发任务数，则任务$k$的处理时延为
+\begin{equation}
+t_k^{\text{proc}}[n] = \frac{\Lambda_k[n] \cdot N_\phi[n]}{f_\phi \times 10^3},
+\end{equation}
+其中，$N_\phi[n]$取任务完成时隙设备上的并发任务数作为近似。对于LLM推理任务，响应速度主要取决于首Token处理时延（Time To First Token，TTFT），即生成第一个输出Token的时间，由Prefill阶段决定：
+\begin{equation}\label{eq:t_TTFT}
+t_k^{\text{TTFT}}[n] = t_k^{\text{proc}}[n] \cdot \zeta_{\text{prefill}},
+\end{equation}
+其中，$\zeta_{\text{prefill}}$为Prefill阶段计算量占总计算量的比例。
+任务$k$的显存需求由LLM模型基础显存与各模态数据显存组成：
+\begin{equation}
+M_k^{\text{req}}[n] = M^{\text{base}} + \sum_{i\in\mathcal{I}(\tau_k)} d_{k,i}^{\text{orig}}[n] \cdot \beta_i,
+\end{equation}
+其中，$M^{\text{base}}$为模型基础显存需求，$\beta_i$为模态$i$的显存占用率系数。设备$\phi$上并发任务的显存总需求不得超过其GPU显存容量：
+\begin{equation}
+\sum_{k \in \mathcal{K}_\phi^{\text{comp}}[n]} M_k^{\text{req}}[n] \leq M_\phi^{\text{GPU}},
+\end{equation}
+其中，$\mathcal{K}_\phi^{\text{comp}}[n]$为在设备$\phi$上处于计算阶段的任务集合。任务$k$的计算能耗由GPU功耗与处理时间决定，可建模为：
+\begin{equation}
+E_k^{\text{comp}}[n] = P_\phi^{\text{GPU}} \cdot t_k^{\text{proc}}[n] \cdot \eta,
+\end{equation}
+其中，$\eta$为GPU利用率。
+
+设备受GPU算力和显存容量的限制，单时隙内可处理的数据量有限，需要对并发任务进行限流。由于任务到达时数据量已知而实际计算量受模态构成影响难以准确预估，采用数据量作为限流依据。设备$\phi$每时隙的处理配额记为$C_\phi$（MB），无人机和地面资源设备的处理配额分别记为$C_m$和$C_v$。当并发任务的待处理数据总量超过$C_\phi$时产生计算过载，需逐时隙按优先级获取处理配额。
+任务完成传输进入计算阶段时，初始化剩余待处理数据量$d_k^{\text{proc}}[n] = \sum_{i\in\mathcal{I}(\tau_k)} d_{k,i}^{\text{orig}}[n]$（MB）。
+每个时隙开始时，设备$\phi$的处理配额初始化为$C_\phi^{\text{rem}}[n]=C_\phi$。设备上处于计算阶段的排队任务按滞留时隙数$t_k^{\text{stay}}[n]$降序排列，等待最久的任务优先获得处理资源。按此优先级，设备依次为每个任务$k$分配处理数据量
+\begin{equation}
+\Delta d_k^{\text{proc}}[n] = \min\!\big(d_k^{\text{proc}}[n],\; C_\phi^{\text{rem}}[n]\big),
+\end{equation}
+并更新剩余配额
+\begin{equation}
+C_\phi^{\text{rem}}[n] \leftarrow C_\phi^{\text{rem}}[n] - \Delta d_k^{\text{proc}}[n].
+\end{equation}
+若配额未耗尽，设备继续为后续排队任务分配配额。配额耗尽后，剩余排队任务在本时隙不获得处理资源，等待下一时隙。每个任务$k$的剩余待处理数据量更新为
+\begin{equation}
+d_k^{\text{proc}}[n+1] = d_k^{\text{proc}}[n] - \Delta d_k^{\text{proc}}[n].
+\end{equation}
+当$d_k^{\text{proc}}[n+1] \leq 0$时，任务$k$的计算全部完成，该任务从$\mathcal{K}_\phi^{\text{comp}}$中移除，用户恢复空闲状态$s_k[n+1]=0$，不再参与后续时隙的配额分配。
+若$d_k^{\text{proc}}[n+1] > 0$，则任务$k$的计算尚未完成，用户维持滞留状态$s_k[n+1]=1$，其剩余数据$d_k^{\text{proc}}[n+1]$在后续时隙继续参与配额的顺序分配，滞留时隙计数$t_k^{\text{stay}}[n+1]$按式\eqref{eq:t_stay}继续累加。
+
+综合传输阶段与计算阶段的状态转移规则，用户$k$的滞留状态$s_k[n+1]$更新为
+\begin{equation}\label{eq:s_k}
+s_k[n+1] =
+\begin{cases}
+1, & d_k^{\text{res}}[n+1] > 0 \text{（传输未完成）},\\
+1, & d_k^{\text{res}}[n+1] = 0 \wedge d_k^{\text{proc}}[n+1] > 0 \text{（计算未完成）},\\
+0, & d_k^{\text{proc}}[n+1] \leq 0 \text{（任务完成）}.
+\end{cases}
+\end{equation}
+
+图\ref{fig:slots}以三个典型场景展示了任务在多个时隙的传输与处理过程。场景(a)中，两个任务分别在单个时隙内经直接链路传输至地面资源设备和无人机，在单个时隙内完成处理。场景(b)中，任务经直接链路传输至地面资源设备，但由于该设备已有任务在处理导致计算过载，新任务需排队等待至下一时隙才获得处理资源。场景(c)中，用户经无人机DF中继将任务转发至地面资源设备，传输跨越两个时隙，到达后同样排队等待。
+
+\begin{figure}[H]
+\centering
+\begin{minipage}[c]{0.48\textwidth}
+  \centering
+  \includegraphics[width=\textwidth, trim=12pt 12pt 12pt 12pt, clip]{figures/sec4/slots-a.pdf}
+\end{minipage}\hfill
+\begin{minipage}[c]{0.52\textwidth}
+  \centering
+  \includegraphics[width=\textwidth, trim=20pt 18pt 20pt 12pt, clip]{figures/sec4/slots-b.pdf}
+\end{minipage}\\[0.3em]
+\begin{minipage}[t]{0.48\textwidth}
+  \subcaption{任务经直接链路传输后完成处理}
+  \label{fig:slots-a}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.48\textwidth}
+  \subcaption{任务经直接链路传输后排队等待}
+  \label{fig:slots-b}
+\end{minipage}
+
+\vspace{0.5em}
+\begin{minipage}[t]{\textwidth}
+  \centering
+  \includegraphics[width=\textwidth, trim=4pt 4pt 4pt 4pt, clip]{figures/sec4/slots-c.pdf}
+  \subcaption{任务经无人机中继转发后跨时隙排队等待}
+  \label{fig:slots-c}
+\end{minipage}
+\caption{三种典型场景下任务跨时隙运行示意}
+\label{fig:slots}
+\end{figure}
+
+\subsubsection{任务完成收益与服务代价效用指标建模}
+\ensubsubsection{Task Completion Reward and Service Cost Utility}
+为了对服务提供方的运营利润和用户体验进行综合衡量，本节设计系统效用指标。
+对于服务提供方而言，单位时间内完成的任务数量以及语义处理质量决定了系统可获得的收益，而无人机、地面资源设备上的LLM推理会产生GPU能耗和处理时延，成为运营成本。
+对于用户而言，任务滞留会延长等待时间，从而影响服务体验。
+在此基础上，定义每时隙的系统效用值为
+\begin{equation}
+U[n] = R^{\text{comp}}[n] - C^{\text{stay}}[n] - C^{\text{comp}}[n]
+\end{equation}
+即系统中任务完成收益减去用户侧任务滞留代价和服务侧任务处理代价。
+
+时隙$n$内，任务完成收益与用户任务完成数量与完成质量相关，可划分为基本收益及语义质量收益，因此时隙$n$服务提供方的任务完成收益可表示为
+\begin{equation}\label{eq:R_comp}
+R^{\text{comp}}[n] = \sum_{k \in \mathcal{K}^{\text{done}}[n]} r_{\text{base}} \big(1 + \alpha_{\text{sem}}\, \tilde{\xi}_k[n]\big),
+\end{equation}
+其中，$\mathcal{K}^{\text{done}}[n]$为在时隙$n$完成处理的任务集合，$r_{\text{base}}$为基础任务完成收益。由于接收端任务完成质量对语义相似度在$[\xi_{\min},\,\xi_{\max}]$范围内的变化较为敏感，直接使用语义相似度原始值难以区分不同SNR和语义符号数配置下的质量差异，为此引入语义增益因子$\tilde{\xi}_k[n]\in[0,1]$，将各模态平均语义相似度映射至$[0,1]$以充分反映语义恢复质量差异对收益的影响：
+\begin{equation}\label{eq:xi_tilde}
+\tilde{\xi}_k[n] = \frac{\bar{\xi}_k[n] - \xi_{\min}}{\xi_{\max} - \xi_{\min}},\quad
+\bar{\xi}_k[n] = \frac{1}{|\mathcal{I}(\tau_k)|}\sum_{i\in\mathcal{I}(\tau_k)}\xi_{k,i}[n],
+\end{equation}
+其中，$\xi_{\min}$和$\xi_{\max}$分别为语义相似度的最小值和最大值，$\alpha_{\text{sem}}$为语义收益权重。完成任务数越多、语义恢复质量越高，$R^{\text{comp}}[n]$越大。
+
+为表示用户任务从生成到完成的全部等待代价，时隙$n$的用户任务滞留代价建模为
+\begin{equation}\label{eq:C_stay}
+C^{\text{stay}}[n] = \sum_{k:\, s_k[n]=1} \beta_{\text{stay}} \big(t_k^{\text{stay}}[n]\big)^2,
+\end{equation}
+其中，$\beta_{\text{stay}}$为滞留惩罚系数。二次形式使边际代价随滞留时隙数递增，反映了用户等待时间越长，体验下降越显著的特点，促使系统在设备选择和资源分配中优先处理长时间滞留的任务。
+
+考虑到LLM推理任务在Prefill阶段处理压力较高，产生资源占用成本，且推理过程产生能耗成本，将时隙$n$的服务提供方处理代价建模为
+\begin{equation}\label{eq:C_comp}
+C^{\text{comp}}[n] = \sum_{k \in \mathcal{K}^{\text{done}}[n]} \big(\lambda_{\text{TTFT}}\, t_k^{\text{TTFT}}[n] + \lambda_E\, E_k^{\text{comp}}[n]\big),
+\end{equation}
+其中，$\lambda_{\text{TTFT}}$和$\lambda_E$分别为GPU时延代价和能耗代价的权重系数。
+% 以上部分行数要严格不变
+\subsection{优化问题建模}
+\ensubsection{Problem Formulation}
+在给定网络拓扑、语义配置与设备约束下，系统通过联合优化设备选择
+$\bm{\phi}^{\text{target}}\triangleq\{\phi_k^{\text{target}}[n],\, k \in \mathcal{K},\,n \in \mathcal{N}\}$，
+带宽分配
+${\bm W}\triangleq\{W_k[n],\, k \in \mathcal{K},\,n \in \mathcal{N}\}$，
+语义符号数
+${\bm T}\triangleq\{T_{k,i}[n],\,k \in \mathcal{K},\,i\in\mathcal{I},\,n \in \mathcal{N}\}$，
+中继选择
+${\bm m}^{\text{relay}}\triangleq\{m_k^{\text{relay}}[n],\,k \in \mathcal{K},\,n \in \mathcal{N}\}$，
+以及无人机加速度
+${\bf a}\triangleq\{{\bf a}_m[n],\,m\in\mathcal{M},\,n \in \mathcal{N}\}$，
+以最大化长时段系统总效用值：
+\begin{subequations}\label{P0:QoE}
+\begin{align}
+\mathop{\max}\limits_{\bm{\phi}^{\text{target}},{\bm W},{\bm T},{\bm m}^{\text{relay}},{\bf a}}\;
+& \sum_{n=1}^{N} U[n] \label{P0:ob}\\[3pt]
+\text{s.t.}\quad
+& T_i^{\min} \le T_{k,i}[n] \le T_i^{\max},\; T_{k,i}[n]\in \mathbb{Z}^+,\quad \forall k\in\mathcal{K},\, i\in\mathcal{I}(\tau_k),\, n\in\mathcal{N},\label{P0:T}\\
+& \phi_k^{\text{target}}[n]\in\boldsymbol{\Phi},\quad m_k^{\text{relay}}[n]\in\{0\}\cup\mathcal{M},\quad \forall k\in\mathcal{K},\, n\in\mathcal{N},\label{P0:bin}\\
+& W_k[n] \ge 0,\;\sum_{k\in\mathcal{K}_\phi} W_k[n] \le W_\phi^{\max},\quad \forall \phi\in\boldsymbol{\Phi},\, n\in\mathcal{N},\label{P0:bw}\\
+& \sum_{k \in \mathcal{K}_\phi^{\text{comp}}[n]} M_k^{\text{req}}[n] \leq M_\phi^{\text{GPU}},\quad \forall \phi\in\boldsymbol{\Phi},\, n\in\mathcal{N},\label{P0:mem}\\
+& \|{\bf v}_m[n]\|\le V_{\max},\;\|{\bf a}_m[n]\|\le A_{\max},\quad \forall m\in\mathcal{M},\,n\in\mathcal{N},\label{P0:velacc}\\
+& {\bf q}_m[n]={\bf q}_m[n-1]+{\bf v}_m[n]\delta_t+\tfrac{1}{2}{\bf a}_m[n]\delta_t^2,\quad \forall m\in\mathcal{M},\,n\in\mathcal{N},\label{P0:dynamics}\\
+& {\bf v}_m[n]={\bf v}_m[n-1]+{\bf a}_m[n]\delta_t,\quad \forall m\in\mathcal{M},\,n\in\mathcal{N}.\label{P0:motion_update}
+\end{align}
+\end{subequations}
+其中，效用值各项$R^{\text{comp}}[n]$、$C^{\text{stay}}[n]$、$C^{\text{comp}}[n]$的定义见式\eqref{eq:R_comp}--\eqref{eq:C_comp}。
+约束条件\eqref{P0:T}将语义符号数限制在有效区间内。
+约束条件\eqref{P0:bin}约束设备选择和中继选择的离散取值范围。
+约束条件\eqref{P0:bw}限制各设备的带宽分配非负，且总和不超过设备最大可用带宽。
+约束条件\eqref{P0:mem}要求各设备上并发任务的显存需求不超过GPU显存容量。
+约束条件\eqref{P0:velacc}--\eqref{P0:motion_update}描述无人机运动动力学并限制速度与加速度。
+
+上述联合优化问题涉及任务关联、语义压缩、中继选择与无人机轨迹的多变量耦合，同时包含离散变量与连续变量，其问题属于混合整数非线性规划问题。
+传统优化方法难以直接求解，加之本场景中移动用户的随机移动、任务到达的随机性以及信道的时变特性引入的不确定性，传统方法难以直接适用。
+强化学习通过与环境的在线交互学习最优策略，不依赖完整的环境动态模型，能够有效应对上述动态性和不确定性。
+然而，系统中存在用户、无人机等功能异构的多个决策实体，若采用集中式单智能体强化学习，所有决策变量的联合优化将会导致动作空间维度超过$K \times (M+V) + K \times I + M \times 2$，策略网络学习困难。
+同时，不同类型决策实体在地理上分布于不同位置，集中式决策需要实时收集全局状态并分发控制指令，产生较大的通信开销和传输时延，难以满足动态且实体较多环境下的实时决策需求。
+采用多智能体强化学习框架可以实现分布式决策，将决策能力下放至多个本地设备，使每个智能体主要依据局部观测独立决策，在降低单一智能体动作空间维度的同时减少信息同步开销，并通过智能体间的协作提升整体系统性能。
+
+%评注SCQ：问题非凸、未来状态不可预知，长期目标xxx，离线优化方案需要知道全局信息，因此不xxx。采用深度强化学习。
+% 穿插、流畅地表达出五个问题：问题是什么，导致问题的原因是什么，解决方案是什么，为什么得到这个解决方案，解决方案为什么有效
+
+\section{基于异构多智能体强化学习的多模态任务效用优化方案设计}
+\ensection{Heterogeneous MARL-Based Optimization Framework}
+%对应上一章节的A：为什么强化学习可以解决，然后说如何构建为强化学习可以处理的问题（建为MDP模型）。
+
+针对上节所述的高维动作空间和分布式决策需求，本章提出基于异构多智能体强化学习的协同优化方案。
+考虑到网络中设备规模增加时，单智能体中心化决策方案的状态同步信令开销快速增大，且策略参数复杂导致难以学习，而采用同构智能体的拆分方式难以合理划分决策职责。
+为充分利用设备侧处理能力完成上述复杂决策问题，将优化过程拆分至无人机与用户两类智能体并行完成，其分别对应两类与原始优化问题直接相关的子问题。
+用户的任务关联、语义符号数选择等决策主要依赖于本地任务状态和信道条件，而无人机的轨迹规划则需要考虑用户分布和效用指标。
+
+\subsection{用户智能体MDP设计}
+\ensubsection{MDP Formulation for User Agents}
+对于每个用户$k \in \mathcal{K}$，定义其MDP为$\mathcal{M}_k^{\text{user}} = \langle \mathcal{O}_k, \mathcal{A}_k, \mathcal{P}_k, \mathcal{R}_k, \gamma^{\text{rl}} \rangle$，其中$\mathcal{O}_k$为观测空间，$\mathcal{A}_k$为动作空间，$\mathcal{P}_k$为状态转移概率，$\mathcal{R}_k$为奖励函数，$\gamma^{\text{rl}}\in(0,1)$为折扣因子。
+每个DRL时间步$t$与系统时隙$n$相互对应，各智能体在时间步$t$获取局部观测$o(t)$并输出决策动作$a(t)$，环境据此计算奖励$r(t)$并转移至下一状态。
+
+\subsubsection{观测空间}
+用户智能体在时隙$n$的局部观测包含任务状态、网络拓扑和资源可用性信息，以支持其做出合理的任务关联和语义压缩决策：
+\begin{equation}
+\begin{aligned}
+    o_k^{\rm MU}[n] = \{&s_k[n],\, d_k^{\text{orig}}[n],\, d_k^{\text{res}}[n],\, t_k^{\text{stay}}[n],\, \rho_k[n],\, \xi_k^{\text{req}}[n],\\
+    &\mathbf{g}_k[n],\, \{\mathbf{q}_m[n]\},\, \{\tilde{\mathbf{g}}_v\},\, \{C_\phi\},\, \{W_\phi^{\text{avail}}[n]\},\, \{\tilde{L}_\phi[n]\}\}.
+\end{aligned}
+\end{equation}
+
+任务状态信息反映当前时隙任务的紧急程度和数据特征，包括滞留标识$s_k[n] \in \{0,1\}$、任务原始数据量$d_k^{\text{orig}}[n]$、剩余数据量$d_k^{\text{res}}[n]$、滞留时隙数$t_k^{\text{stay}}[n]$、任务类型$\rho_k[n]$以及语义相似度要求$\xi_k^{\text{req}}[n]$。
+原始数据量$d_k^{\text{orig}}[n]$由任务模态类型决定，单模态图像任务仅包含图像数据，而多模态任务则同时包含图像数据和音频数据。
+位置信息涵盖用户自身位置$\mathbf{g}_k[n]$、无人机位置$\{\mathbf{q}_m[n]\}_{m\in\mathcal{M}}$以及地面资源设备位置$\{\tilde{\mathbf{g}}_v\}_{v\in\mathcal{V}}$，用于估算各链路的信道质量并为设备选择和中继决策提供依据。
+资源状态信息包含各设备的处理能力$\{C_\phi\}_{\phi\in\boldsymbol{\Phi}}$、剩余可用带宽$\{W_\phi^{\text{avail}}[n]\}_{\phi\in\boldsymbol{\Phi}}$和预估负载$\{\tilde{L}_\phi[n]\}_{\phi\in\boldsymbol{\Phi}}$（定义见式\eqref{eq:tilde_L}），其中$W_\phi^{\text{avail}}[n]$为设备$\phi$在时隙$n$的剩余可用带宽，帮助智能体评估设备服务能力，并避免将任务分配至过载设备。
+
+\subsubsection{动作空间}
+
+用户智能体在时隙$n$的动作包含设备选择、语义压缩配置和中继启用门控三类变量：
+\begin{equation}
+a_k^{\rm MU}[n] = \{\mathbf{w}_k^{\text{dev}},\, \mathbf{T}_k,\, g_k^{\text{relay}}\}.
+\end{equation}
+设备选择通过偏好向量$\mathbf{w}_k^{\text{dev}} \in [0,1]^{M+V}$实现，执行时选取权重最大且类型匹配的设备作为目标设备$\phi_k^{\text{target}}[n]$，从而确定任务关联的目的节点。
+语义符号数分配向量$\mathbf{T}_k = [T_k^{(\text{image})}, T_k^{(\text{audio})}]$为每个模态指定语义符号数，其中图像模态$T_k^{(\text{image})} \in [T_{\min}^{\text{image}}, T_{\max}^{\text{image}}]$，音频模态$T_k^{(\text{audio})} \in [T_{\min}^{\text{audio}}, T_{\max}^{\text{audio}}]$，符号数越大保留的语义信息越完整但传输负载越高。
+中继启用门控$g_k^{\text{relay}} \in [0,1]$用于表示用户是否请求经无人机中继传输。当$g_k^{\text{relay}}$超过阈值$g_{\text{th}}$且目标设备为地面资源设备时，系统在动作映射阶段根据当前信道状态为该任务分配具体的中继无人机，分配规则将在第~\ref{sec:action_mapping}~节介绍。
+该连续参数化输出与设备偏好向量的设计思路一致，避免了离散组合搜索带来的动作空间膨胀，便于策略梯度算法优化。
+
+\subsubsection{带宽分配策略}
+带宽分配不作为用户智能体的直接动作输出，而是在设备选择确定后根据当前待传输数据量和信道状态单独计算。
+相应的优化建模和比例分配结果在第4.2.3节动作映射策略中统一给出。
+
+\subsubsection{奖励函数}
+
+用户智能体的奖励函数由全局奖励与局部奖励加权组成。全局奖励以目标函数~\eqref{P0:ob}中的效用值为基础，将其除以用户数$K$以保持奖励幅值不随用户规模增大而膨胀，稳定训练梯度。由于效用值中$C^{\text{stay}}[n]$按时隙对所有滞留任务持续累积惩罚，奖励信号在任务处理过程中保持密集，避免了仅依赖任务完成收益$R^{\text{comp}}[n]$导致的稀疏反馈。
+优化问题中的语义相似度约束和显存约束\eqref{P0:mem}属于不等式约束，无法直接用于梯度优化。为此，将这些约束转化为连续惩罚项纳入奖励函数，当约束被违反时产生与违反程度成正比的惩罚，引导策略向满足约束的方向调整：
+\begin{equation}
+R[n] = \frac{U[n]}{K} - P^{\text{qos}}[n] - P^{\text{overload}}[n],
+\end{equation}
+其中，$U[n]/K$为目标函数~\eqref{P0:ob}中单时隙效用值$U[n]$按用户数$K$归一化的结果，定义见式\eqref{eq:R_comp}--\eqref{eq:C_comp}。$P^{\text{qos}}[n]$为QoS违约惩罚，同样除以$K$：
+\begin{equation}
+P^{\text{qos}}[n] = \frac{\lambda_{\text{qos}}}{K}\sum_{k:\, s_k[n]=1}\max\!\left(0,\,\frac{\xi_k^{\text{req}}[n] - \bar{\xi}_k[n]}{\xi_k^{\text{req}}[n]}\right),
+\end{equation}
+其中，$\lambda_{\text{qos}}$为QoS惩罚权重。当用户$k$的平均语义相似度$\bar{\xi}_k[n]$低于其任务要求$\xi_k^{\text{req}}$时，产生与语义相似度的相对不足量$\frac{\xi_k^{\text{req}} - \bar{\xi}_k}{\xi_k^{\text{req}}}$成正比的惩罚。$P^{\text{overload}}[n]$为设备过载惩罚，当设备计算负载超出处理能力时触发：
+\begin{equation}
+P^{\text{overload}}[n] = \frac{\lambda_{\text{ol}}}{K}\sum_{\phi\in\boldsymbol{\Phi}}\max\!\left(0,\,\frac{\tilde{L}_\phi[n] - C_\phi}{C_\phi}\right),
+\end{equation}
+其中，$\lambda_{\text{ol}}$为过载惩罚权重，$C_\phi$为设备$\phi$的每时隙处理配额。$\tilde{L}_\phi[n]$为设备$\phi$的预估负载，定义为
+\begin{equation}\label{eq:tilde_L}
+\tilde{L}_\phi[n] = L_\phi[n] + \sum_{k \in \mathcal{K}_\phi^{\text{trans}}[n]} d_k^{\text{orig}}[n],
+\end{equation}
+其中，$L_\phi[n]$为已进入计算阶段的任务负载，$\mathcal{K}_\phi^{\text{trans}}[n]$为已选择设备$\phi$但仍处于传输阶段的任务集合。由于任务的传输阶段跨越多个时隙，若仅在传输完成后才将负载计入设备，奖励反馈将严重滞后，智能体难以及时感知过载风险。因此，$\tilde{L}_\phi[n]$在用户选择设备时即将该任务预计入设备负载，使过载惩罚在决策时立即生效。全局奖励的各项均按用户数$K$归一化，使奖励幅值不随用户数增大而增大，保持训练梯度稳定。局部奖励反映单个用户的滞留惩罚和QoS违约：
+\begin{equation}
+R_k^{\text{local}}[n] = -C_k^{\text{stay}}[n] - P_k^{\text{qos}}[n],
+\end{equation}
+其中，$C_k^{\text{stay}}[n]$和$P_k^{\text{qos}}[n]$分别为用户$k$的滞留惩罚和QoS违约惩罚。全局奖励使所有用户与系统效用目标保持一致，局部奖励则对产生滞留或违约的用户施加额外惩罚，以明确单个用户的责任。用户$k$的最终奖励为两者的加权和：
+\begin{equation}
+r_k[n] = w_{\text{global}}^{\rm U} \cdot R[n] + w_{\text{local}}^{\rm U} \cdot R_k^{\text{local}}[n],
+\end{equation}
+其中，$w_{\text{global}}^{\rm U}$和$w_{\text{local}}^{\rm U}$分别为全局和局部奖励的权重系数。
+
+\subsection{无人机智能体MDP设计}
+\ensubsection{MDP Formulation for UAV Agents}
+对于每架无人机$m \in \mathcal{M}$，定义其MDP为$\mathcal{M}_m^{\text{uav}} = \langle \mathcal{O}_m, \mathcal{A}_m, \mathcal{P}_m, \mathcal{R}_m, \gamma^{\text{rl}} \rangle$。
+与用户智能体不同，无人机智能体主要负责轨迹规划决策，其时间尺度相对较长，需要考虑全局用户分布和长期服务效果。
+
+\subsubsection{观测空间}
+
+无人机智能体在时隙$n$的局部观测定义为
+\begin{equation}
+\begin{aligned}
+o_m^{\rm UAV}[n] = \{&\mathbf{q}_m[n],\, \mathbf{v}_m[n],\, \{\mathbf{g}_k[n]\},\, \{s_k[n]\},\, \{t_k^{\text{stay}}[n]\},\\
+&\{\mathbf{q}_{m'}[n]\}_{m'\neq m},\, \{\mathbf{c}_j[n]\}_{j=1}^{M},\, \{|\mathcal{U}_{m'}[n]|\},\, \{\tilde{L}_{m'}[n]\}\}.
+\end{aligned}
+\end{equation}
+%TODO: 外审可能问为什么聚类数恰好等于M，需补充说明"聚类数与无人机数量相同，使各无人机对应一个聚类中心作为参考指示点"
+其中，$\mathcal{O}_m$涵盖自身运动状态、用户分布与任务状况、以及无人机协同信息三个层面。
+自身运动状态包括三维位置$\mathbf{q}_m[n] = (x_m[n], y_m[n], z_m[n])$和速度向量$\mathbf{v}_m[n] = (v_x[n], v_y[n], v_z[n])$。
+用户分布信息包含所有用户位置$\{\mathbf{g}_k[n]\}_{k\in\mathcal{K}}$以及对应的任务滞留标识$\{s_k[n]\}_{k\in\mathcal{K}}$和滞留时隙数$\{t_k^{\text{stay}}[n]\}_{k\in\mathcal{K}}$，使无人机能够感知任务需求的空间分布特征。
+协同信息包括其他无人机位置$\{\mathbf{q}_{m'}[n]\}_{m'\in\mathcal{M}, m'\neq m}$、对用户位置聚类得到的$M$个聚类中心$\{\mathbf{c}_j[n]\}_{j=1}^{M}$、各无人机当前服务的用户数$\{|\mathcal{U}_{m'}[n]|\}$和预估计算负载$\{\tilde{L}_{m'}[n]\}$，聚类中心为无人机的轨迹规划提供空间参考点，具体作用将在奖励函数中说明。
+
+\subsubsection{动作空间}
+
+无人机智能体在时隙$n$的动作$a_m^{\rm UAV}[n]$为三维加速度向量$\mathbf{a}_m = (a_x, a_y, a_z)$，满足约束$\|\mathbf{a}_m\| \leq A_{\max}$。环境根据式\eqref{eq:q}--\eqref{eq:v}的运动模型更新无人机的速度和位置。采用加速度作为动作可保证速度的时序连续性。
+
+\subsubsection{奖励函数}
+
+无人机智能体的奖励函数由局部辅助奖励和全局效用值奖励两部分加权组成：
+\begin{equation}
+r_m[n] = w_{\text{local}}^{\rm V} \cdot R_m^{\text{cluster}}[n] + w_{\text{global}}^{\rm V} \cdot \tilde{R}^{\text{global}}[n],
+\end{equation}
+其中，$w_{\text{local}}^{\rm V}$和$w_{\text{global}}^{\rm V}$分别为局部和全局奖励的权重系数。
+由于各类型任务均匀随机生成，用户需求在空间上无显著偏向性。因此，无人机的部署策略倾向于趋向各用户聚类中心以缩短与用户的平均通信距离，从而提升系统效用。
+系统在每个时间步对所有用户位置执行K-means聚类，得到$M$个聚类中心$\{\mathbf{c}_j\}_{j=1}^M$。这些聚类中心代表用户的空间分布，为无人机的轨迹规划提供参考位置。
+为度量各无人机与用户的接近程度，按距离最近原则将用户划分为$\mathcal{U}_m = \{k : m = \arg\min_{m'} \|\mathbf{g}_k - \mathbf{q}_{m'}\|_2\}$，该划分独立于用户智能体的设备选择决策。局部奖励定义为
+\begin{equation}
+R_m^{\text{cluster}}[n] = \frac{1}{1 + \bar{d}_m[n] / S},
+\end{equation}
+其中，$\bar{d}_m[n] = \frac{1}{|\mathcal{U}_m|}\sum_{k\in\mathcal{U}_m}\|\mathbf{g}_k - \mathbf{q}_m[n]\|_2$为无人机$m$到$\mathcal{U}_m$中用户的平均距离，$S$为服务区域边长。平均距离越小奖励越大，引导无人机向用户密集区域移动以缩短通信距离。
+全局奖励$\tilde{R}^{\text{global}}[n]$为系统整体奖励$R[n]$的归一化值。局部奖励引导无人机缩短与用户的通信距离，全局奖励使无人机的轨迹决策与系统效用值一致。
+
+\subsection{智能体动作映射策略}
+\ensubsection{Action Mapping Mechanism for Agents}
+Actor网络输出为连续动作，但系统执行时需要确定设备选择、语义符号数、中继启用状态和无人机加速度，并且所有决策还需满足区域边界、带宽总量和中继连接数等约束，因此无法直接作为系统可执行的动作。为此，需要设计动作映射策略，将两类智能体的原始连续动作进行转换，获得满足约束的资源分配与控制结果。完整流程总结于算法~\ref{sec4:alg_action_mapping}。
+
+\renewcommand{\algorithmiccomment}[1]{\hfill $\triangleright$ #1}
+\begin{algorithm}[!ht]
+\caption{异构智能体动作映射}
+\label{sec4:alg_action_mapping}
+\begin{algorithmic}[1]
+
+\STATE \textbf{输入：}用户原始动作$\{\tilde{\mathbf{a}}_k\}_{k\in\mathcal{K}}$，无人机原始动作$\{\tilde{\mathbf{a}}_m\}_{m\in\mathcal{M}}$
+\STATE \textbf{输出：}可执行动作$\{\mathbf{a}_k\}$，$\{\mathbf{a}_m\}$，带宽分配$\{W_k\}$，中继分配$\{m_k^{\text{relay}}\}$
+
+\STATE \textbf{// 用户智能体动作映射}
+\FOR{用户 $k \in \mathcal{K}$}
+    \STATE 解析设备偏好向量$\mathbf{w}_k^{\text{dev}} \in [0,1]^{M+V}$、语义符号数$\tilde{\mathbf{T}}_k$和中继门控$g_k^{\text{relay}}$
+    \IF{$s_k = 1$}
+        \STATE $\phi_k^{\text{target}} \leftarrow \phi_k^{(n-1)}$ \COMMENT{沿用上一时隙的目标设备}
+    \ELSE
+        \STATE $\phi_k^{\text{target}} \leftarrow \arg\max_{\phi:\, \rho_k \in \mathcal{T}_{\text{sup}}(\phi)} w_{k,\phi}^{\text{dev}}$ \COMMENT{在兼容设备中选权重最大者}
+    \ENDIF
+    \FOR{模态 $i \in \mathcal{I}(\tau_k)$}
+        \STATE $T_{k,i} \leftarrow \text{clip}\big(\lfloor \tilde{T}_{k,i} \rceil,\; T_i^{\min},\; T_i^{\max}\big)$ \COMMENT{离散化至合法区间}
+    \ENDFOR
+\ENDFOR
+
+\STATE \textbf{// 中继选择}
+\FOR{用户 $k$: $\phi_k^{\text{target}} > M$}
+    \IF{$s_k = 1$且$m_k^{\text{relay}}[n-1] \geq 0$}
+        \STATE $m_k^{\text{relay}} \leftarrow m_k^{\text{relay}}[n-1]$ \COMMENT{滞留任务沿用上一时隙的中继}
+    \ELSIF{$s_k = 0$且$g_k^{\text{relay}} \geq g_{\text{th}}$}
+        \FOR{无人机 $m \in \mathcal{M}$}
+            \STATE $\eta_{k,m} \leftarrow \min(\gamma_{k \to m},\; \gamma_{m \to \phi_k}) \;/\; \gamma_{k,\phi_k}^{\text{direct}}$ \COMMENT{基于当前信道状态估计中继增益}
+        \ENDFOR
+    \ENDIF
+\ENDFOR
+\STATE 对满足中继触发条件的任务按$\eta_{k,m}$降序贪心分配中继无人机 \COMMENT{满足每架无人机最大中继数约束}
+
+\STATE \textbf{// 带宽分配}
+\FOR{设备 $\phi \in \boldsymbol{\Phi}$}
+    \STATE 根据各用户任务状态确定待传输数据量$d_k^{\text{pending}}$ \COMMENT{见系统模型定义}
+    \STATE $W_k \leftarrow \dfrac{\sqrt{d_k^{\text{pending}} / \log_2(1+\gamma_{k,\phi})}}{\sum_{k'\in\mathcal{K}_\phi} \sqrt{d_{k'}^{\text{pending}} / \log_2(1+\gamma_{k',\phi})}} \cdot W_\phi^{\max}$ \COMMENT{按比例分配带宽}
+\ENDFOR
+
+\STATE \textbf{// 无人机智能体动作映射}
+\FOR{无人机 $m \in \mathcal{M}$}
+    \STATE 输出加速度$\mathbf{a}_m$，按式\eqref{eq:q}--\eqref{eq:v}更新运动状态
+\ENDFOR
+
+\end{algorithmic}
+\end{algorithm}
+
+算法第4--13行描述用户智能体的动作映射过程。
+对于$s_k[n]=0$的新产生任务，设备选择在满足任务类型约束$\rho_k \in \mathcal{T}_{\text{sup}}(\phi)$的设备子集上取偏好权重最大值，确保任务被分配至能够处理该类型的设备。
+对于$s_k[n]=1$的尚未完成传输的跨时隙任务，目标设备沿用上一时隙的分配$\phi_k^{(n-1)}$，以保证多时隙传输的连续性。
+语义符号数从连续值经四舍五入和裁剪映射为合法整数区间$[T_i^{\min}, T_i^{\max}]$内的离散值。
+算法第15--25行描述中继选择过程。
+中继相关决策采用两阶段实现。用户智能体先输出中继启用门控$g_k^{\text{relay}}$，环境再根据任务状态、目标设备类型和当前信道状态确定是否为该任务分配具体中继无人机。
+对于选择地面资源设备的新任务用户，当$g_k^{\text{relay}}$超过阈值$g_{\text{th}}$时，算法基于当前时隙的信道状态估计中继增益$\eta_{k,m} = \frac{\gamma_{k,m}^{\text{relay}}}{\gamma_{k,\phi}^{\text{direct}}}$，其中$\gamma_{k,m}^{\text{relay}} = \min(\gamma_{k \to m}, \gamma_{m \to \phi})$为两跳瓶颈信噪比，$\gamma_{k,\phi}^{\text{direct}}$为直连信噪比。
+对于跨时隙滞留任务，若上一时隙已锁定中继无人机，则当前时隙继续沿用该中继分配，以保证传输过程的连续性。
+由于信道状态随时间变化，$\eta_{k,m}$为基于当前观测的估计值而非精确增益。
+对满足中继触发条件的任务，全局按$\eta_{k,m}$降序贪心分配中继无人机，$\eta_{k,m}$越大表明该用户经中继传输的信噪比相对直连提升越显著，同时满足每架无人机的最大中继连接数约束。
+算法第26--30行描述带宽分配过程。
+系统整体优化目标为长期效用值最大化而非时延最小化，但两者存在单调一致性：在固定设备选择与语义压缩配置下，缩短传输时延直接减少跨时隙滞留次数，降低任务滞留代价$C^{\text{stay}}$，同时加快设备资源释放以服务后续任务，提升任务完成收益$R^{\text{comp}}$。
+因此，在设备分配确定后，最小化各设备的总传输时延即可提升效用值。
+据此将带宽分配从智能体动作空间中分离，对每个设备求解以下时延最小化子问题：
+\begin{equation}
+\min_{\{W_k[n]\}_{k\in\mathcal{K}_\phi}} \sum_{k \in \mathcal{K}_\phi} \frac{d_k^{\text{pending}}[n]}{W_k[n] \log_2(1+\gamma_{k,\phi}[n])}, \quad \text{s.t.} \;\; \sum_{k \in \mathcal{K}_\phi} W_k[n] = W_\phi^{\max}.
+\label{eq:bw_opt}
+\end{equation}
+记$c_k[n] = \frac{d_k^{\text{pending}}[n]}{\log_2(1+\gamma_{k,\phi}[n])}$，构造拉格朗日函数$\mathcal{L} = \sum_k \frac{c_k[n]}{W_k[n]} + \lambda(\sum_k W_k[n] - W_\phi^{\max})$，由一阶最优性条件$\partial \mathcal{L}/\partial W_k = -\frac{c_k[n]}{W_k[n]^2} + \lambda = 0$可得$W_k[n] = \sqrt{\frac{c_k[n]}{\lambda}}$，代入约束$\sum_k W_k[n] = W_\phi^{\max}$消去$\lambda$，即得算法中的比例分配公式：
+\begin{equation}
+W_k^*[n] = \frac{\sqrt{c_k[n]}}{\sum_{k'\in\mathcal{K}_\phi}\sqrt{c_{k'}[n]}} \cdot W_\phi^{\max} = \frac{\sqrt{d_k^{\text{pending}}[n] / \log_2(1+\gamma_{k,\phi}[n])}}{\sum_{k'\in\mathcal{K}_\phi} \sqrt{d_{k'}^{\text{pending}}[n] / \log_2(1+\gamma_{k',\phi}[n])}} \cdot W_\phi^{\max}.
+\label{eq:bw_solution}
+\end{equation}
+该结果表明，待传输数据量越大或信道条件越差的用户将获得更多带宽，以均衡各用户的传输时延。这一分离降低了Actor网络需要优化的动作空间维度。
+算法第31--34行为无人机智能体的动作映射，Actor网络直接输出加速度向量，环境按系统模型中的运动方程更新速度和位置。
+
+\subsection{MAPPO优化框架}
+\ensubsection{MAPPO Algorithm Framework}
+基于上述分析，本章采用MAPPO算法\supercite{Yu_2022_NeurIPS_MAPPO}求解异构多智能体协同优化问题。与第三章面向单智能体的GPPO不同，MAPPO需要解决多个异构智能体间的协调与参数共享问题。
+
+\subsubsection{面向多无人机多用户系统的智能体建模}
+
+本章系统包含用户和无人机两类异构智能体，分别记为$p\in\{{\rm U},{\rm V}\}$，其中${\rm U}$表示用户类，${\rm V}$表示无人机类。
+系统为每类智能体维护独立的Actor-Critic网络，设第$p$类智能体的Actor网络参数为$\boldsymbol{\theta}^p$，Critic网络参数为$\boldsymbol{\xi}^p$。
+Actor网络$\pi(\cdot|o;\boldsymbol{\theta}^p)$根据用户局部观测$o_k^{\rm MU}[n]$或无人机局部观测$o_m^{\rm UAV}[n]$输出高斯分布的均值与标准差参数，通过采样获得连续动作。
+Critic网络$V(s;\boldsymbol{\xi}^p)$以全局状态$s[n]$为输入估计价值函数，为策略梯度估计提供方差更低的基线。
+两类智能体共享相同的全局状态$s[n] = \{o_k^{\rm MU}[n]\}_{k\in\mathcal{K}} \cup \{o_m^{\rm UAV}[n]\}_{m\in\mathcal{M}}$，即所有智能体的局部观测信息的并集。
+同类型智能体共享相同的网络参数，即所有$K$个用户智能体共用$(\boldsymbol{\theta}^{\rm U}, \boldsymbol{\xi}^{\rm U})$，所有$M$架无人机智能体共用$(\boldsymbol{\theta}^{\rm V}, \boldsymbol{\xi}^{\rm V})$。
+
+\subsubsection{智能体参数共享机制}
+
+在上述多智能体系统中，若每个智能体维护独立的网络参数，训练参数量将随智能体数量线性增长，增加训练和部署复杂度。由于各智能体采集的经验样本数量和质量存在差异，同类型智能体的策略收敛程度可能参差不齐，进而导致不同用户获得的服务质量差异较大。
+
+针对上述问题，本章采用同类型智能体共享Actor网络参数的训练方案，即第$p$类的所有智能体使用相同的Actor-Critic网络$(\boldsymbol{\theta}^p, \boldsymbol{\xi}^p)$，并在每个训练周期内聚合该类型所有智能体的经验数据进行同步更新。
+该方案将需要独立维护的网络组数从$K+M$降至$2$，大幅减少训练和存储开销。
+在样本利用方面，若各智能体独立维护参数，每个智能体每个epoch仅能积累$N$条经验用于自身网络的更新。
+而在参数共享下，同类型的所有智能体经验汇入同一缓冲区，以$K$个用户智能体为例，每个epoch共积累$K \times N$条经验用于共享策略的更新，有效样本规模扩大$K$倍，加速策略收敛并保证同类型智能体的策略一致性。
+
+\subsubsection{多无人机多模态语义通信网络效用最大化MAPPO训练方案}
+
+各类智能体的策略更新沿用第三章介绍的PPO裁剪目标函数与GAE优势估计方法。
+设更新比率$r_t(\boldsymbol{\theta}^p) = \frac{\pi(a_t|o_t;\boldsymbol{\theta}^p)}{\pi(a_t|o_t;\boldsymbol{\theta}^p_{\rm old})}$，其中优势函数$\hat{A}_t^p$通过GAE方法估计。
+第$p$类智能体的Actor损失$L_{\rm act}^p$在式\eqref{sec3:actor_update}的PPO裁剪代理目标基础上减去策略熵正则化项$c_e H(\pi(\cdot;\boldsymbol{\theta}^p))$，其中$c_e$为熵系数，$H(\cdot)$为策略熵，鼓励策略保持适度探索。
+Critic损失$L_{\rm cri}^p$按式\eqref{sec3:critic_update}计算预测价值与回报目标之间的均方误差。
+两类智能体的Actor和Critic网络使用独立的优化器分别更新参数，基于本类型所有智能体聚合的经验数据进行优化。
+
+上述异构MAPPO框架的整体架构如图~\ref{fig:mappo_arch}所示。
+在集中式训练阶段，地面控制中心为用户和无人机两类智能体分别维护独立的Actor-Critic网络。
+每个时隙内，服务区域中的用户$k$和无人机$m$根据各自的局部观测$o_k^{\rm MU}[n]$和$o_m^{\rm UAV}[n]$，通过所属类型的Actor网络输出动作$a_k^{\rm MU}[n]$和$a_m^{\rm UAV}[n]$并与环境交互，获得奖励$r_k[n]$和$r_m[n]$以及全局状态$s[n]$。
+交互经验按智能体类型存入各自的经验缓冲区，经GAE方法计算优势估计和价值目标后，优化器分别更新两类网络的参数$\boldsymbol{\theta}^p$和$\boldsymbol{\xi}^p$，并将更新后的Actor网络参数下发至各智能体。
+在分布式执行阶段，各智能体主要依据局部观测通过所属类型的Actor网络独立决策，不依赖全局状态的集中汇聚与统一指令下发。
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.95\textwidth,trim=10 10 10 10,clip]{figures/sec4/mappo.pdf}
+\caption{异构多智能体MAPPO的集中式训练与分布式执行框架}
+\label{fig:mappo_arch}
+\end{figure}
+
+异构多智能体MAPPO的完整训练流程总结于算法~\ref{sec4:alg_mappo}。
+每轮训练中，所有智能体与环境交互$N_c$个回合以收集经验数据，每回合包含$N$个时隙，对应一个完整的任务处理周期。
+用户智能体和无人机智能体按各自策略并行决策，原始动作经算法~\ref{sec4:alg_action_mapping}映射后提交给环境执行，如第6--12行所示。
+$N_c$个回合的经验数据收集完毕后，按智能体类型分别聚合，独立计算GAE优势估计和价值目标，并执行$N_{\text{epoch}}$轮PPO参数更新，如第14--20行所示。
+
+\begin{algorithm}[!ht]
+\caption{异构多智能体MAPPO训练算法}
+\label{sec4:alg_mappo}
+\begin{algorithmic}[1]
+
+\STATE \textbf{输入：}总训练轮数$T_{\max}$，每轮数据收集回合数$N_c$，每回合时隙数$N$，PPO更新轮数$N_{\text{epoch}}$
+\STATE 初始化两类网络参数$(\boldsymbol{\theta}^{\rm U}, \boldsymbol{\xi}^{\rm U}),(\boldsymbol{\theta}^{\rm V}, \boldsymbol{\xi}^{\rm V})$和经验缓冲区$\mathcal{B}^{\rm U}, \mathcal{B}^{\rm V}$
+
+\FOR{训练轮 $t = 1$ \TO $T_{\max}$}
+    \FOR{回合 $e = 1$ \TO $N_c$}
+        \STATE 重置环境，获取初始观测$\{o_i^{(0)}\}_{i=1}^{N_{\text{agent}}}$
+        \FOR{时隙 $n = 1$ \TO $N$}
+            \FOR{智能体 $i \in \mathcal{I}$}
+                \STATE 根据类型$p_i$的Actor网络采样动作$\tilde{a}_i^{(n)} \sim \pi(\cdot | o_i^{(n)};\boldsymbol{\theta}^{p_i})$
+            \ENDFOR
+            \STATE 经算法~\ref{sec4:alg_action_mapping}映射为可执行动作，环境执行并返回$\{o_i^{(n+1)}, r_i^{(n)}\}$
+            \STATE 将$(o_i^{(n)}, \tilde{a}_i^{(n)}, r_i^{(n)}, o_i^{(n+1)})$存入$\mathcal{B}^{p_i}$
+        \ENDFOR
+    \ENDFOR
+
+    \FOR{每类智能体 $p \in \{{\rm U}, {\rm V}\}$}
+        \STATE 从$\mathcal{B}^p$取出经验数据，计算GAE优势估计$\hat{A}_t^p$和价值目标$V_t^{{\rm target},p}$
+        \FOR{PPO更新 $j = 1$ \TO $N_{\text{epoch}}$}
+            \STATE 采样小批量数据，计算$L_{\rm act}^p$和$L_{\rm cri}^p$
+            \STATE 更新$\boldsymbol{\theta}^p \leftarrow \boldsymbol{\theta}^p - \alpha \nabla_{\boldsymbol{\theta}} L_{\rm act}^p$，$\boldsymbol{\xi}^p \leftarrow \boldsymbol{\xi}^p - \beta \nabla_{\boldsymbol{\xi}} L_{\rm cri}^p$
+        \ENDFOR
+        \STATE 清空$\mathcal{B}^p$
+    \ENDFOR
+\ENDFOR
+
+\STATE \textbf{输出：}训练完成的网络参数$\boldsymbol{\theta}^{\rm U},\, \boldsymbol{\theta}^{\rm V}$
+
+\end{algorithmic}
+\end{algorithm}
+
+算法第8行体现了同类型智能体共享Actor网络参数的设置，所有用户智能体通过相同的策略$\pi(\cdot;\boldsymbol{\theta}^{\rm U})$采样动作，所有无人机智能体通过$\pi(\cdot;\boldsymbol{\theta}^{\rm V})$采样动作，各智能体的行为差异来源于局部观测数据的不同。第10行完成动作映射与环境交互，第11行将交互经验存储到经验缓冲区，第15行对同类型经验进行聚合。
+每轮训练累积$N_c$个回合的经验数据后再执行参数更新。
+以$K$个用户智能体为例，共享的Actor网络在每次更新中可利用$K \times N \times N_c$条经验，相较于单回合的$K \times N$条，样本规模扩大$N_c$倍，有助于降低策略梯度估计的方差，提升训练稳定性。
+第20行在参数更新后清空缓冲区，维持算法的同策略特性，即每轮更新仅使用当前策略采集的经验数据。
+训练完成后的部署阶段，各智能体仅凭局部观测通过所属类型的Actor网络独立决策，不依赖全局状态信息或智能体间实时通信，实现集中式训练与分布式执行。
+
+\section{仿真设置与结果分析}
+\ensection{Simulation Results}
+\subsection{仿真场景与参数设置}
+\ensubsection{Simulation Scenarios and Parameter Settings}
+本节通过仿真实验评估所提MAPPO算法的性能。
+仿真场景考虑一个$1000\,\text{m} \times 1000\,\text{m}$的正方形区域，其中部署$K$个移动用户、$M$架无人机和$V$个地面资源设备。
+用户在区域内随机分布并按照高斯-马尔可夫移动模型运动，无人机以固定高度$H$在水平面内飞行。
+仿真参数设置如表\ref{tab:sim_params_net}、表\ref{tab:sim_params_comp}和表\ref{tab:train_params}所示，各参数在相关文献典型取值的基础上，结合模型中物理指标与奖励分量的数量级平衡进行设定\supercite{Liu_2023_TWC_Energy, Hu_2025_TCOM_Resource}。
+
+\begin{table}[htb]
+\centering
+\caption{网络拓扑与通信仿真参数设置}
+\label{tab:sim_params_net}
+{\small
+\renewcommand{\arraystretch}{0.82}
+\begin{tabular}{@{}ll@{}}
+\toprule
+{\bfseries\heiti 参数名称} & {\bfseries\heiti 取值} \\
+\midrule
+\multicolumn{2}{l}{\textit{网络拓扑参数}} \\
+用户数量 $K$ & 30 \\
+无人机数量 $M$ & 7 \\
+地面资源设备数量 $V$ & 7 \\
+区域边长 $D$ & 1000\,m \\
+无人机飞行高度 $H$ & 100\,m \\
+时隙长度 $\delta_t$ & 1.0\,s \\
+\midrule
+\multicolumn{2}{l}{\textit{通信参数}} \\
+无人机最大带宽 $W_m^{\max}$ & 12\,MHz \\
+地面资源设备最大带宽 $W_v^{\max}$ & 8\,MHz \\
+用户发射功率 $P_k$ & 0.1\,W \\
+噪声功率谱密度 $N_0$ & $-163$\,dBm/Hz \\
+参考信道增益 $\beta_0$ & $-30$\,dB \\
+路径损耗指数 $\alpha_1$ & 3 \\
+\midrule
+无人机最大速度 $V_{\max}$ & 20\,m/s \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{计算、任务与语义通信仿真参数设置}
+\label{tab:sim_params_comp}
+{\small
+\renewcommand{\arraystretch}{0.82}
+\begin{tabular}{@{}ll@{}}
+\toprule
+{\bfseries\heiti 参数名称} & {\bfseries\heiti 取值} \\
+\midrule
+\multicolumn{2}{l}{\textit{GPU计算参数}} \\
+无人机GPU算力 $f_m$ & 2.5\,TFLOPS \\
+地面资源设备GPU算力 $f_v$ & 15\,TFLOPS \\
+无人机每时隙处理配额 $C_m$ & 10\,MB \\
+地面资源设备每时隙处理配额 $C_v$ & 30\,MB \\
+\midrule
+\multicolumn{2}{l}{\textit{任务参数}} \\
+任务生成概率 $p_k^{\text{arr}}$ & 0.5 \\
+图像数据量 $d_{\text{image}}$ & $5{\sim}8$\,MB \\
+音频数据量 $d_{\text{audio}}$ & $3{\sim}5$\,MB \\
+图像计算强度 $\kappa_{\text{image}}$ & 200\,GFLOPs/MB \\
+音频计算强度 $\kappa_{\text{audio}}$ & 300\,GFLOPs/MB \\
+\midrule
+\multicolumn{2}{l}{\textit{语义通信参数}} \\
+图像语义符号数 $T_{\text{img}}$ & $2{\sim}8$ \\
+音频语义符号数 $T_{\text{audio}}$ & $2{\sim}16$ \\
+图像压缩基数 $L_{\text{img}}$ & 12 \\
+音频压缩基数 $L_{\text{audio}}$ & 25.6 \\
+语义相似度要求 $\xi^{\text{req}}$ & $0.8{\sim}0.9$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{效用函数与训练参数设置}
+\label{tab:train_params}
+{\small
+\renewcommand{\arraystretch}{0.82}
+\begin{tabular}{@{}ll@{\hspace{1.2em}}ll@{}}
+\toprule
+{\bfseries\heiti 参数名称} & {\bfseries\heiti 取值} & {\bfseries\heiti 参数名称} & {\bfseries\heiti 取值} \\
+\midrule
+\multicolumn{4}{l}{\textit{效用函数参数}} \\
+基础完成收益 $r_{\text{base}}$ & 10 & 语义增强系数 $\alpha_{\text{sem}}$ & 4.0 \\
+滞留惩罚系数 $\beta_{\text{stay}}$ & 2.0 & TTFT权重 $\lambda_{\text{TTFT}}$ & 0.5 \\
+能耗权重 $\lambda_E$ & 0.05 & 中继门控阈值 $g_{\text{th}}$ & 0.5 \\
+\midrule
+\multicolumn{4}{l}{\textit{MAPPO训练参数}} \\
+Actor/Critic隐藏层 & 128, 64 & 学习率 $\eta^{\text{lr}}$ & $10^{-4}$ \\
+折扣因子 $\gamma^{\text{rl}}$ & 0.9 & PPO裁剪参数 $\epsilon$ & 0.2 \\
+GAE参数 $\lambda_{\rm gae}$ & 0.95 & 批大小 & 256 \\
+每回合时隙数 $N$ & 200 & 每轮收集回合数 $N_c$ & 10 \\
+PPO更新轮数 $N_{\text{epoch}}$ & 10 & 总训练轮数 $T_{\max}$ & 300 \\
+用户全局奖励权重 $w_{\text{global}}^{\rm U}$ & 0.7 & 用户局部奖励权重 $w_{\text{local}}^{\rm U}$ & 0.3 \\
+无人机局部奖励权重 $w_{\text{local}}^{\rm V}$ & 0.67 & 无人机全局奖励权重 $w_{\text{global}}^{\rm V}$ & 0.33 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+
+训练过程中，用户智能体和无人机智能体独立维护自身的Actor网络和Critic网络，采用Adam优化器进行参数更新。
+与第三章不同，本章系统采用OFDMA消除了同信道干扰，用户间的资源耦合主要体现在共享目标设备的带宽与算力，而非相互干扰关系，拓扑结构对单个用户决策的影响相对有限，因此Actor网络采用全连接多层感知机结构。
+两类Actor网络均按式~\eqref{sec3:reparam}的重参数化方式从高斯分布中采样连续动作。
+为保证训练稳定性，采用正交初始化方法初始化网络权重，并对优势函数进行归一化处理。
+
+\subsubsection{多模态语义通信实现}
+\ensubsubsection{Multi-modal Semantic Communication}
+多模态数据集采用UCF-101\supercite{Soomro_2012_UCF101_UCF101}中包含声音的51个动作类别子集，每个样本包含视频帧和对应音频。图像模态取视频中间帧，缩放为$128 \times 128$像素的3通道RGB图像。音频模态经短时傅里叶变换后提取为$128 \times 64$的单通道梅尔频谱图。图像和音频各自对应独立训练的SNN语义编解码器。
+
+仿真中采用基于脉冲神经网络的多模态语义编码器。
+图像模态经过四层残差卷积编码器压缩至 $8 \times 8 \times 512 \times T_{\text{img}}$ 维脉冲特征表示，压缩基数 $L_{\text{img}} = 12$，语义符号数 $T_{\text{img}}$ 在 $[2, 8]$ 范围内选择。
+音频模态经过四层残差卷积编码器压缩至 $8 \times 4 \times 128 \times T_{\text{audio}}$ 维脉冲特征表示，压缩基数 $L_{\text{audio}} = 25.6$，语义符号数 $T_{\text{audio}}$ 在 $[2, 16]$ 范围内选择。
+编码器采用IF神经元模型，通过脉冲编码将连续值数据转换为时序脉冲序列。
+
+信道模块采用加性高斯白噪声信道模型，根据预设的信噪比向编码后的离散脉冲序列添加相应功率的高斯噪声。解码端通过对称的解卷积网络恢复原始数据表示，并计算重建质量指标以评估语义保真度。
+
+\subsection{对比方案}
+\ensubsection{Benchmark Schemes}
+为评估所提MAPPO算法的性能，将其与以下基准方案进行对比：
+
+（1）\textbf{PPO}\supercite{Schulman_2017_arXiv_Proximal}：采用单智能体PPO算法，将所有用户和无人机的决策变量整合在单一Actor网络中进行联合优化。
+
+（2）\textbf{MAA2C}\supercite{Li_2022_IoTJ_Deep}：多智能体优势Actor-Critic算法，各智能体采用与MAPPO相同的异构网络结构，但策略更新采用基于优势函数的A2C损失函数，用于对比PPO与A2C在多智能体场景中的训练效果。
+
+（3）\textbf{无语义通信}：采用与所提方案相同的多智能体框架，但传输方式替换为传统比特通信，不进行语义编码压缩，用于评估语义通信机制的性能贡献。
+
+（4）\textbf{无人机固定}：无人机部署于区域内固定位置，仅由用户智能体参与决策，无人机不执行轨迹优化，用于评估无人机轨迹规划的性能贡献。
+
+（5）\textbf{无中继}：取消无人机中继转发功能，所有用户仅通过D2D直接链路传输任务数据，用于评估无人机中继机制的性能贡献。
+
+\subsection{仿真结果分析}
+\ensubsection{Performance Evaluation}
+
+\subsubsection{SNN语义通信模型性能验证}
+\ensubsubsection{SNN Semantic Communication Verification}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\columnwidth]{figures/sec4/semantic_sc_image.pdf}
+    \caption{图像单模态下不同语义符号数 $T_{\text{img}}$ 的分类准确率随 SNR 变化曲线}
+    \label{fig:sec4:sc_image}
+\end{figure}
+
+为获得仿真所需的语义相似度参数化模型，对训练好的SNN语义编解码器在不同信噪比和语义符号数条件下的分类性能进行验证。
+图~\ref{fig:sec4:sc_image} 展示了图像单模态下分类准确率随 SNR 变化的曲线。
+所有 $T_{\text{img}}$ 取值的曲线均呈现典型的 S 形趋势，SNR 低于 $-5$ dB 时准确率接近随机猜测水平，随着 SNR 提升准确率迅速增长，至 $5$ dB 以上趋于饱和。
+$T_{\text{img}}$ 越大，累积的语义信息越充分，高 SNR 下的饱和准确率越高，$T_{\text{img}}=8$ 时约为 89.8\%，$T_{\text{img}}=2$ 时约为 82.1\%。
+图中同时绘制了按式~\eqref{eq:xi_fit}拟合的曲线，拟合决定系数 $R^2$ 均接近 0.999，表明参数化模型与实验结果吻合。
+
+
+\begin{figure}[H]
+    \centering
+    \vspace{-0.35em}
+    \includegraphics[width=0.8\textwidth,trim=0 1pt 0 0,clip]{figures/sec4/semantic_sc_image_audio_legend.pdf}\\[0.05em]
+    \includegraphics[width=0.8\textwidth]{figures/sec4/semantic_sc_image_audio.pdf}
+    \caption{图像与音频双模态下各 $T_{\text{img}}$ 取值对应的分类准确率随 SNR 变化曲线}
+    \label{fig:sec4:sc_image_audio}
+\end{figure}
+
+图~\ref{fig:sec4:sc_image_audio}展示了同时使用图像与音频两种模态时的分类准确率，图中每组对应一个$T_{\text{img}}$取值，各曲线代表不同$T_{\text{audio}}$配置。
+与图~\ref{fig:sec4:sc_image}对比可知，引入音频模态后，各条件下的分类准确率均有提升。
+例如，$T_{\text{img}}=8$、$T_{\text{audio}}=16$时，高SNR下准确率可达约92.7\%，较仅使用图像模态提升约3个百分点。
+$T_{\text{audio}}$增大时准确率提升幅度也呈递减趋势，从$T_{\text{audio}}=2$到$T_{\text{audio}}=8$的提升较为显著，但$T_{\text{audio}}>8$后边际增益有限。
+上述结果表明，SNN语义编解码器在多模态条件下能提取和压缩语义信息，且按式~\eqref{eq:xi_fit}拟合的参数化模型可描述SNR与$T$对语义相似度的联合影响，后续系统级仿真直接采用该参数化模型计算语义相似度。
+
+\subsubsection{算法收敛性分析}
+
+\begin{figure}[H]
+\centering
+\vspace{-1.5em}
+\includegraphics[width=\textwidth,trim=0 1pt 0 0,clip]{figures/sec4/converge-legend-ch4.pdf}\\[0.05em]
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/step_algorithm_obj_convergence_curve_6wyuxmiu.pdf}
+\caption{效用值}
+\label{fig:sec4:conv_obj}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/step_algorithm_comp_rew_convergence_curve_6wyuxmiu.pdf}
+\caption{平均任务完成收益}
+\label{fig:sec4:conv_comp_rew}
+\end{subfigure}
+\\[0.5em]
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/step_algorithm_comp_tasks_convergence_curve_6wyuxmiu.pdf}
+\caption{平均每时隙完成任务数}
+\label{fig:sec4:conv_comp_tasks}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/step_algorithm_cost_convergence_curve_6wyuxmiu.pdf}
+\caption{平均服务代价}
+\label{fig:sec4:conv_cost}
+\end{subfigure}
+\caption{各方案收敛曲线对比}
+\label{fig:sec4:convergence}
+\end{figure}
+
+图\ref{fig:sec4:convergence}给出了各方案在训练过程中效用值及各分项指标随训练步数的收敛情况。
+从系统效用值$U[n]$来看，所提MAPPO算法收敛速度最快，最终效用值稳定在约270的水平，高于PPO的约150--200和MAA2C的约$-200$--$0$。
+单智能体PPO算法收敛至约150--200，其性能受限于将$K$个用户和$M$架无人机的所有决策变量整合至单一Actor网络所引起的高维动作空间，增大了策略搜索的难度。
+
+无人机固定方案的系统效用值收敛至约200--230，与完整MAPPO方案之间有一定差距，表明无人机轨迹优化有助于改善用户的信道条件。
+无中继方案收敛至约50--100，效用值大幅下降，说明无人机中继对延伸D2D通信距离和改善远端用户传输条件的贡献突出。
+无语义通信方案效用值波动剧烈，收敛至约$-100$--$0$，原因在于相同频谱资源约束条件下，传统比特通信无法进行语义压缩，大数据量的多模态任务在有限带宽内难以及时传输完毕，任务滞留代价和任务处理代价因此显著增加。
+MAA2C方案在所有方案中性能最低，效用值仅收敛至约$-200$--$0$，训练过程的波动也最大，反映出A2C方法在多智能体协同场景中训练稳定性不及PPO裁剪机制。
+
+为进一步分析效用值差异的来源，图\ref{fig:sec4:conv_comp_rew}、图\ref{fig:sec4:conv_comp_tasks}和图\ref{fig:sec4:conv_cost}分别展示了单用户平均任务完成收益$R^{\text{comp}}[n]/K$、平均每时隙完成任务数和单用户平均服务代价$(C^{\text{stay}}[n]+C^{\text{comp}}[n])/K$的收敛情况。
+在任务完成收益方面，MAPPO收敛至最高水平，完成任务数和语义恢复质量均达到最高。
+图\ref{fig:sec4:conv_comp_tasks}进一步印证了这一结论：MAPPO方案的平均每时隙完成任务数收敛至约10--11，显著高于MAA2C（约6--7）和无语义通信方案（约7--8）。
+无人机固定方案的完成任务数与MAPPO接近，说明即使缺乏轨迹优化，系统仍能完成较多任务，但其效用值差距主要体现在代价侧。
+无语义通信方案的任务完成收益最低，原因在于传统比特通信下大量任务因传输超时而无法完成。
+在服务代价方面，无语义通信方案和MAA2C方案的代价在训练初期显著偏高且波动剧烈，反映了任务大量滞留和设备过载的问题。
+MAPPO方案的代价收敛至最低水平，异构多智能体框架能够协调任务分配与资源利用，减少滞留惩罚和计算开销。
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth,trim=0 1pt 0 0,clip]{figures/sec4/converge-legend-ch4.pdf}\\[0.05em]
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/step_algorithm_rew_user_convergence_curve_6wyuxmiu.pdf}
+\caption{用户智能体奖励收敛曲线}
+\label{fig:sec4:conv_rew_user}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/step_algorithm_rew_uav_convergence_curve_6wyuxmiu.pdf}
+\caption{无人机智能体奖励收敛曲线}
+\label{fig:sec4:conv_rew_uav}
+\end{minipage}
+\end{figure}
+图\ref{fig:sec4:conv_rew_user}和图\ref{fig:sec4:conv_rew_uav}分别展示了用户智能体和无人机智能体的奖励收敛情况。
+用户智能体奖励反映了任务关联和语义压缩决策的结果，MAPPO方案下用户智能体奖励收敛至正值区间，而无语义通信和MAA2C方案的用户奖励始终为负且波动较大，说明这些方案的用户智能体在训练过程中持续承受较高的代价，未能学到有效的任务分配和压缩策略。
+无人机智能体奖励体现了轨迹规划对缩短用户通信距离的效果，MAPPO方案的无人机奖励收敛最快且最高，说明无人机通过训练逐步接近用户密集区域。
+
+\subsubsection{无人机数量对系统性能的影响}
+
+\begin{figure}[H]
+\centering
+\vspace{-1.5em}
+\includegraphics[width=\textwidth,trim=0 1pt 0 0,clip]{figures/sec4/bar-legend-K-ch4.pdf}\\[0.05em]
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/M_algorithm_obj_bar_6wyuxmiu.pdf}
+\subcaption{系统效用值}
+\label{fig:sec4:m_algorithm_obj}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/M_algorithm_completion_reward_bar_6wyuxmiu.pdf}
+\subcaption{平均任务完成收益}
+\label{fig:sec4:m_algorithm_comp_rew}
+\end{minipage}
+\caption{不同无人机数量$M$下各方案的系统效用值与平均任务完成收益对比}
+\label{fig:sec4:m_algorithm}
+\end{figure}
+
+
+图\ref{fig:sec4:m_algorithm}展示了不同无人机数量$M$下各方案的系统效用值与任务完成收益。
+可以看到，所有方案的效用值均随$M$的增加而提升，这是由于更多的无人机为网络提供了更充裕的空中中继节点和计算资源。
+从平均任务完成收益来看（图\ref{fig:sec4:m_algorithm_comp_rew}），各方案的完成收益同样随$M$增加而上升，其中MAPPO方案从$M=5$时的约8.0提升至$M=10$时的约12.1。
+无语义通信方案的完成收益与MAPPO较为接近，$M=10$时约为11.1，原因在于未经语义压缩的任务一旦完成便具有更高的保真度加成，但其效用值受大量任务滞留代价拖累反而最低。
+MAA2C方案的完成收益在各$M$取值下均远低于其他方案，$M=5$时仅约2.1，进一步表明其训练不稳定直接降低了任务完成率。
+
+在所有$M$取值下，MAPPO方案始终保持最优性能。
+当$M$从5增至10时，MAPPO的效用值从约170提升至约300。
+无人机固定方案在$M$较大时与MAPPO的差距有所缩小，说明当无人机数量充足时，密集的空间分布可部分弥补缺乏轨迹优化的不足。
+无中继方案和无语义通信方案虽然也随$M$增大而改善，但幅度有限，表明单纯增加无人机数量不能替代中继功能和语义通信机制的作用。
+MAA2C在各$M$取值下性能均最低，再次表明PPO裁剪机制在多智能体训练中的收敛性更好。
+
+\subsubsection{用户数量对系统性能的影响}
+
+\begin{figure}[H]
+\centering
+\vspace{-1.5em}
+\includegraphics[width=\textwidth,trim=0 1pt 3pt 0,clip]{figures/sec4/bar-legend-K-ch4.pdf}\\[0.05em]
+\begin{minipage}[t]{0.48\textwidth}
+  \centering
+  \includegraphics[width=\textwidth]{figures/sec4/K_algorithm_obj_bar_gk3cvy97_qtjjws53.pdf}
+  \subcaption{系统效用值}
+  \label{fig:sec4:k_algorithm_obj}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.48\textwidth}
+  \centering
+  \includegraphics[width=\textwidth]{figures/sec4/K_algorithm_completion_reward_bar_gk3cvy97_qtjjws53.pdf}
+  \subcaption{平均任务完成收益}
+  \label{fig:sec4:k_algorithm_comp_rew}
+\end{minipage}
+\caption{不同用户数量$K$下各方案的系统效用值与平均任务完成收益对比}
+\label{fig:sec4:k_algorithm}
+\end{figure}
+
+
+图\ref{fig:sec4:k_algorithm}展示了不同用户数量$K$下各方案的系统效用值和平均任务完成收益。
+
+从效用值看，MAPPO方案的效用值随$K$增大先升后降：$K$从15增加到35时效用值从约186升至约303，$K$超过35后开始下降，到$K=50$时降至约125。
+与之对应，其完成收益随$K$单调下降（$K=15$时约13.7，$K=50$时约6.4）。
+两项指标的变化趋势差异表明，$K\leq35$阶段任务数量的增加使完成收益总量足以覆盖代价增长，效用值仍能提升。
+$K>35$以后任务滞留代价和任务处理代价增长的速度超过了完成收益，效用值随之下降。
+
+PPO方案在$K$较小时表现与MAPPO接近，$K=15$时效用值约190、完成收益约13.8，但随$K$增大性能急剧恶化，$K=50$时效用值跌至约$-390$、完成收益降至约5.1。单智能体将所有用户和无人机的决策整合至单一网络，在高维场景下难以有效协调资源分配，任务因此大量积压。MAA2C方案在所有$K$取值下效用值和完成收益均为最低，反映了A2C方法在多智能体协同场景中训练不稳定的问题。
+
+无语义通信方案效用值随$K$增大下降最快，$K=25$时即变为负值，$K=50$时约$-1391$。
+但其任务完成收益在$K\geq40$后反而超过MAPPO方案（$K=50$时约7.2 vs 6.4）。
+这一现象的原因在于$R^{\text{comp}}$中包含语义质量加成项$1+\alpha_{\text{sem}}\tilde{\xi}_k$，无语义通信方案不进行语义压缩，已完成任务的语义保真度取最大值，因而单任务奖励更高。
+然而，未经压缩的大数据量引发了大量任务滞留，产生的代价远超其任务完成收益优势。
+该结果表明语义通信的性能增益主要来源于压缩传输数据量以降低系统负载，而非提升单任务的完成质量。
+
+无中继方案的效用值下降较为平缓，但$K\geq45$后变为负值，说明在大规模用户场景下无人机中继的必要性更加突出。无人机固定方案在各$K$取值下效用值始终为正，$K=50$时约106，但任务完成收益的下降速度快于MAPPO（$K=50$时仅约5.3 vs 6.4），表明用户密集时轨迹优化对改善信道条件和提高任务完成率的作用更为显著。
+
+\subsubsection{无人机数量与用户数量的联合影响}
+
+\begin{figure}[H]
+\centering
+\vspace{-1.5em}
+\includegraphics[width=\textwidth,trim=0 1pt 5pt 0,clip]{figures/sec4/trend-legend-K-M-ch4.pdf}\\[0.05em]
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/M_K_obj_trend_std_d17g9xsr.pdf}
+\subcaption{系统效用值}
+\label{fig:sec4:m_k_obj}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/M_K_compl_rew_trend_std_d17g9xsr.pdf}
+\subcaption{平均任务完成收益}
+\label{fig:sec4:m_k_comp_rew}
+\end{minipage}
+\caption{不同用户数量$K$与无人机数量$M$下的系统效用值与平均任务完成收益}
+\label{fig:sec4:m_k}
+\end{figure}
+
+
+图\ref{fig:sec4:m_k}展示了在MAPPO算法下，不同用户数量$K$与无人机数量$M$对系统效用值和平均任务完成收益的联合影响。
+其中，图\ref{fig:sec4:m_k_obj}给出了效用值，图\ref{fig:sec4:m_k_comp_rew}给出了平均任务完成收益。可以观察到，效用值随$K$和$M$的增大均呈上升趋势。
+固定$M$时，用户数量的增加使系统内生成和完成的任务总量增多，从而提高了系统的总体效用。
+固定$K$时，增加无人机数量为用户提供了更多的中继和计算服务能力，降低了任务滞留率。
+与效用值不同，任务完成收益在固定$M$下随$K$增大而下降，在固定$K$下随$M$增大而上升。
+例如$K=15$时，完成收益从$M=5$的约10.6升至$M=10$的约13.0。
+而$K=40$时仅从约8.2升至约9.5，增幅明显收窄，说明用户密集时单用户可获得的资源受限，无人机对单用户完成质量的提升效果减弱。
+
+进一步分析可以发现，在用户数量较多时，增加无人机数量带来的效用增益更为显著。
+以$K=40$为例，$M$从5增至10时效用值的提升量明显大于$K=15$时的相应增量。
+原因在于，用户数量较多的场景下系统对无人机中继和计算资源的需求更为迫切，增加无人机能够有效缓解传输瓶颈和计算过载。
+同时可以注意到，固定$M$下效用值随$K$增大的边际增量逐渐减小，表明虽然更多用户带来了更多的任务处理机会，但资源争用和排队等待也随之加剧，单用户的平均服务质量有所下降。
+各曲线的置信区间显示，在$K$较大且$M$较小时系统性能的方差增大，反映了资源紧张条件下系统对用户随机分布和任务到达随机性更加敏感。
+本组仿真采用的滞留惩罚系数$\beta_{\text{stay}}=1$、过载惩罚权重为10、语义增强系数$\alpha_{\text{sem}}=3$，与其他小节的默认参数（$\beta_{\text{stay}}=2$、过载惩罚权重20、$\alpha_{\text{sem}}=4$）略有差异，读者在跨图对比效用值绝对数值时应留意该差异。
+
+\subsubsection{信道条件与用户数量的联合影响}
+
+\begin{figure}[H]
+\centering
+\vspace{-1.5em}
+\includegraphics[width=\textwidth,trim=0 1pt 5pt 0,clip]{figures/sec4/trend-legend-K-N0-ch4.pdf}\\[0.05em]
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/N0_K_obj_trend_std_3v8zhkxp.pdf}
+\subcaption{系统效用值}
+\label{fig:sec4:n0_k_obj}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/N0_K_compl_rew_trend_std_3v8zhkxp.pdf}
+\subcaption{平均任务完成收益}
+\label{fig:sec4:n0_k_comp_rew}
+\end{minipage}
+\caption{$N_0$与$K$对系统效用值与平均任务完成收益的影响}
+\label{fig:sec4:n0_k}
+\end{figure}
+
+
+图\ref{fig:sec4:n0_k}展示了在MAPPO算法下，不同噪声功率谱密度$N_0$与用户数量$K$对系统效用值和平均任务完成收益的联合影响。
+其中，图\ref{fig:sec4:n0_k_obj}给出了效用值，图\ref{fig:sec4:n0_k_comp_rew}给出了平均任务完成收益。
+可以观察到，效用值随$N_0$的增大而下降，随$K$的增大而上升。
+固定$K$时，$N_0$的增大导致信道噪声增强，用户与设备间的信噪比降低，传输速率下降，任务传输时延增加，从而降低了系统效用。
+固定$N_0$时，用户数量的增加使系统内生成和完成的任务总量增多，提高了系统的总体效用。相应地，任务完成收益也随$N_0$增大而下降。
+由于该指标按用户平均，固定$N_0$时其随$K$增大反而下降，说明用户规模扩大后单用户可获得的完成收益被资源竞争所摊薄。
+
+进一步分析可以发现，用户数量较少时信道条件恶化对效用值的影响更为显著。
+以$K=15$为例，$N_0$从$3\times10^{-20}$增至$7\times10^{-20}$\,W/Hz时效用值的下降幅度明显大于$K=40$时的相应降幅。
+原因在于，用户较少时系统任务总量有限，信道质量下降直接导致单个任务传输失败或滞留，对总效用影响更为明显；而用户数量较多时，任务总量较大使部分任务的成功完成仍能维持较高效用。
+同时，固定$N_0$下效用值随$K$增大的增长趋势在信道条件较差时更为平缓，表明噪声较强时传输瓶颈限制了系统对更多用户的服务能力。
+置信区间显示$N_0$较大且$K$较小时性能方差增大，反映了恶劣信道条件下系统对用户分布和信道衰落更为敏感。
+
+\subsubsection{数据规模与无人机处理能力的敏感性分析}
+
+\begin{figure}[H]
+\centering
+\vspace{-1.5em}
+\includegraphics[width=\textwidth,trim=0 5pt 5pt 0,clip]{figures/sec4/trend-legend-C-uav-ch4.pdf}
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/image_data_size_max_C_uav_obj_trend_std_ygpwx9v7.pdf}
+\subcaption{系统效用值}
+\label{fig:sec4:datasize_c_obj}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/image_data_size_max_C_uav_compl_rew_trend_std_ygpwx9v7.pdf}
+\subcaption{平均任务完成收益}
+\label{fig:sec4:datasize_c_comp_rew}
+\end{minipage}
+\caption{图像数据量与无人机每时隙处理能力$C_m$对系统效用值与平均任务完成收益的联合影响}
+\label{fig:sec4:datasize_c}
+\end{figure}
+
+图\ref{fig:sec4:datasize_c}分析了图像数据量上限与无人机每时隙处理能力$C_m$对系统效用值和平均任务完成收益的联合影响。
+其中，图\ref{fig:sec4:datasize_c_obj}给出了效用值，图\ref{fig:sec4:datasize_c_comp_rew}给出了平均任务完成收益。
+可以看到，效用值随图像数据量的增大而单调递减，随$C_m$的增大而提升。当$C_m$较低时，图像数据量的增大导致效用值急剧下降。
+这是因为无人机每时隙能处理的数据量不足以覆盖大规模任务，任务在计算阶段产生排队等待，同时滞留任务占用后续时隙的传输资源，形成级联的性能恶化。
+从平均任务完成收益来看（图\ref{fig:sec4:datasize_c_comp_rew}），完成收益随$C_m$增大而提升、随图像数据量增大而下降，趋势与效用值一致。
+当$C_m$取最低值时，完成收益从最小数据规模的约8.6降至最大数据规模的约5.5；$C_m$取最高值时，完成收益提升至约15.9--12.3，且对数据量变化的敏感度明显降低，说明充足的处理能力不仅提升效用值，也能在大数据量场景下维持较高的任务完成质量。
+
+当$C_m$增至较高水平后，效用值在各数据规模下均保持较高水平，且曲线的下降趋势明显减缓，说明充足的处理能力能够有效吸收数据规模增加带来的计算负担。
+但$C_m$继续增大的边际收益递减，表明此时传输时延而非计算时延成为系统性能的主要瓶颈。
+上述结果表明，在网络设计中应根据预期的任务数据规模合理配置无人机的每时隙处理能力，避免计算环节成为系统瓶颈。
+而当处理能力充裕后，应转向优化通信资源配置以进一步提升效用。
+
+% \subsubsection{数据规模与带宽约束的性能分析}
+
+% 图\ref{fig:sec4:datasize_w}展示了图像数据量上限与无人机最大带宽$W_m^{\max}$对效用值的联合影响。与算力的影响类似，效用值随数据量增大而下降，随带宽增加而提升。在带宽较低时，数据量增大导致效用值显著下降，这是由于有限的频谱资源难以支撑大数据量任务的传输需求，用户任务在传输阶段产生长时间滞留。当带宽增至较高水平后，各数据规模下的效用值趋于平稳，不同带宽配置之间的差距逐渐缩小，表明在高带宽条件下传输不再是系统的主要瓶颈，计算和语义处理环节开始主导系统性能。
+
+% 将图\ref{fig:sec4:datasize_c}与图\ref{fig:sec4:datasize_w}对比可以发现，在数据量较小时，不同带宽和算力配置下的效用值差异较小，轻量级任务对资源配置的敏感度较低。而在数据量较大时，带宽和算力的差异对效用值的影响显著增大，体现了大数据量多模态任务对通信和计算资源的双重依赖。
+% \begin{figure}[h]
+% \centering
+% \includegraphics[width=0.6\textwidth]{figures/sec4/image_data_size_max_W_max_uav_obj_trend_std_nzjmt4c9.pdf}
+% \caption{图像数据量与无人机带宽$W_m^{\max}$对效用值的联合影响}
+% \label{fig:sec4:datasize_w}
+% \end{figure}
+
+\subsubsection{无人机轨迹空间分布}
+
+\begin{figure}[H]
+\vspace{-1.5em}
+\centering
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/traj_20260314_163357_736853_rn5.pdf}
+\subcaption{样例一}
+\label{fig:sec4:traj_case_a}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/traj_20260314_164251_313806_rp2.pdf}
+\subcaption{样例二}
+\label{fig:sec4:traj_case_b}
+\end{minipage}
+\caption{不同回合的空间轨迹示意图}
+\label{fig:sec4:traj_case}
+\end{figure}
+
+图\ref{fig:sec4:traj_case}展示了MAPPO策略收敛后两个回合中无人机和移动用户的运动轨迹，仿真参数为$K=30$、$M=7$、$V=7$、$T=200$。
+从两个样例中均可观察到，7架无人机的终点在1\,km$\times$1\,km区域内较为分散，各架无人机的飞行路径朝向不同的用户密集区域延伸，各无人机在空间上形成分区服务的分工格局。
+这种行为与无人机局部奖励$R_m^{\text{cluster}}$的设计一致，由于$R_m^{\text{cluster}}$随无人机到近邻用户平均距离的减小而增大，各架无人机在训练过程中学习到分别趋向各自服务的用户子集。
+对比图\ref{fig:sec4:traj_case_a}和图\ref{fig:sec4:traj_case_b}还可以发现，两个回合中用户初始位置和移动路径不同，无人机的飞行方向和终点分布也相应改变，表明MAPPO策略并未收敛到固定的空间部署，而是根据每个回合的用户分布规划飞行路径。
+
+\subsubsection{任务生成概率与地面资源设备数量的影响}
+
+\begin{figure}[H]
+\centering
+\vspace{-1.5em}
+\includegraphics[width=\textwidth,trim=0 1pt 5pt 0,clip]{figures/sec4/trend-legend-V-ch4.pdf}
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/task_gen_prob_V_obj_trend_std_yb1lgzbw.pdf}
+\subcaption{系统效用值}
+\label{fig:sec4:prob_v_obj}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/sec4/task_gen_prob_V_compl_rew_trend_std_yb1lgzbw.pdf}
+\subcaption{平均任务完成收益}
+\label{fig:sec4:prob_v_comp_rew}
+\end{minipage}
+\caption{任务生成概率$p_k^{\text{arr}}$与地面资源设备数量$V$对系统效用值与平均任务完成收益的联合影响}
+\label{fig:sec4:prob_v}
+\end{figure}
+
+
+图\ref{fig:sec4:prob_v}展示了任务生成概率$p_k^{\text{arr}}$与地面资源设备数量$V$对系统效用值和平均任务完成收益的联合影响，反映了系统在不同负载水平下的承载能力差异。其中，图\ref{fig:sec4:prob_v_obj}给出了效用值，图\ref{fig:sec4:prob_v_comp_rew}给出了平均任务完成收益。
+
+当$V$较小时，效用值随$p_k^{\text{arr}}$的增大而急剧下降。
+原因在于地面资源设备数量不足时，有限的计算和通信资源难以承载高到达率的任务流，任务大量滞留使代价项急剧增加。当$V$增至5以上时，效用值呈现先升后降的趋势。
+上升阶段表明在低任务到达率下系统资源未被充分利用，任务完成收益有限。随着$p_k^{\text{arr}}$增大，更多任务被处理和完成，系统效用提升。
+当$p_k^{\text{arr}}$进一步增大后，系统负载逐渐接近饱和，任务滞留代价和任务处理代价的增长速度超过完成收益，效用值回落。
+与之相比，平均任务完成收益随$p_k^{\text{arr}}$增大整体上升，且$V$越大曲线越高，说明增加地面资源设备数量能够将更多到达任务转化为已完成任务，效用值后期回落主要由代价项增长所致。
+
+各曲线的置信区间表明，在$V$较小且$p_k^{\text{arr}}$较大时系统性能的方差显著增大，反映了资源紧张条件下系统性能对任务到达和用户分布的随机性更加敏感。
+该结果说明，在网络规划中应根据预期的任务负载强度合理配置地面资源设备数量，以保证系统在高负载条件下维持稳定的服务质量。
+本组仿真采用$M=6$架无人机、语义增强系数$\alpha_{\text{sem}}=3$，与其他小节的默认参数（$M=7$、$\alpha_{\text{sem}}=4$）略有差异。
+
+
+\section{本章小结}
+\ensection{Chapter Summary}
+
+本章研究了多无人机辅助多模态语义通信网络中面向LLM理解任务的通信与计算资源联合优化问题。
+建立了包含跨时隙传输滞留与计算排队、多模态语义编解码和无人机运动的系统模型，将联合优化任务关联、语义压缩、中继选择、无人机轨迹与处理设备分配的问题建模为混合整数非线性规划。
+提出了基于异构多智能体近端策略优化的求解方案，将用户侧的任务处理决策与无人机侧的轨迹规划解耦为两类智能体，并通过解析式带宽分配与基于信道增益的中继选择策略降低动作空间维度。
+仿真结果表明，所提方案在效用指标上优于多种基准方案，语义通信、无人机中继和轨迹优化模块均对系统性能有贡献。
+参数分析给出了无人机数量、用户数量、信道条件、任务到达率等关键参数对系统效用的影响趋势。

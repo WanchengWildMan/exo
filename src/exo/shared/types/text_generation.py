@@ -36,6 +36,33 @@ def resolve_reasoning_params(
     return resolved_effort, resolved_thinking
 
 
+def resolve_max_output_tokens(
+    *,
+    max_output_tokens: int | None,
+    enable_thinking: bool | None,
+    default_max_tokens: int,
+    thinking_content_token_reserve: int,
+) -> int:
+    """Resolve the internal generation budget for a text generation request.
+
+    When thinking is enabled and the caller explicitly requested a max token
+    budget, reserve extra internal budget so the model has room to emit a final
+    non-thinking answer after reasoning.
+    """
+    requested_max_output_tokens = max_output_tokens or default_max_tokens
+    if (
+        max_output_tokens is None
+        or enable_thinking is not True
+        or thinking_content_token_reserve <= 0
+    ):
+        return requested_max_output_tokens
+
+    return min(
+        default_max_tokens,
+        requested_max_output_tokens + thinking_content_token_reserve,
+    )
+
+
 class InputMessage(BaseModel, frozen=True):
     """Internal message for text generation pipelines."""
 

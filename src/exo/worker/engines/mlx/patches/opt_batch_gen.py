@@ -1,10 +1,41 @@
+import os
 import time
 from typing import Any, cast
 
 import mlx.core as mx
+from loguru import logger
 from mlx_lm.generate import BatchGenerator, generation_stream
 
 _PRECOMPUTE_TOP_K = 20
+
+# ── Decode-phase memory management (aligned with oMLX) ──────────────────────
+# How often (in decode steps) to force mx.synchronize() + mx.clear_cache().
+# On 16GB devices running 9B models, intermediate tensors from decode steps
+# accumulate rapidly.  512 is far too infrequent — 8 tokens can already OOM.
+# oMLX does sync+clear much more aggressively.  Default: every 1 step.
+_DECODE_SYNC_INTERVAL: int = int(os.getenv("EXO_DECODE_SYNC_INTERVAL", "1"))
+
+# Decode memory safety valve: if Metal memory exceeds this limit (in GB) at
+# the START of a decode step (before the forward pass), force-finish all
+# entries with finish_reason="length" instead of running the forward pass
+# and risking OOM.  Default 0 = auto (total_ram − 1.5 GB).
+_DECODE_MAX_METAL_GB: float = float(os.getenv("EXO_DECODE_MAX_METAL_GB", "0"))
+
+_decode_memory_limit_bytes: int | None = None
+
+
+def _get_decode_memory_limit_bytes() -> int:
+    """Return the decode-phase Metal memory limit in bytes (cached)."""
+    global _decode_memory_limit_bytes
+    if _decode_memory_limit_bytes is not None:
+        return _decode_memory_limit_bytes
+    if _DECODE_MAX_METAL_GB > 0:
+        _decode_memory_limit_bytes = int(_DECODE_MAX_METAL_GB * 1024**3)
+    else:
+        import psutil
+        total_gb = psutil.virtual_memory().total / (1024**3)
+        _decode_memory_limit_bytes = int((total_gb - 1.5) * 1024**3)
+    return _decode_memory_limit_bytes
 
 _original_public_next = BatchGenerator.next
 
@@ -21,6 +52,38 @@ def _fast_next(self: BatchGenerator) -> list[BatchGenerator.Response]:
 
     prev_tokens = batch.y
     prev_logprobs = batch.logprobs
+
+    global _pending_topk_idx, _pending_topk_val, _pending_selected_lps
+
+    # ── Memory safety valve (aligned with oMLX ProcessMemoryEnforcer) ────
+    # Check BEFORE the forward pass.  If Metal memory already exceeds the
+    # limit after the previous step's sync+clear, skip the forward pass and
+    # force-finish all entries with finish_reason="length" to prevent OOM.
+    active_bytes = mx.get_active_memory()
+    limit_bytes = _get_decode_memory_limit_bytes()
+    if active_bytes > limit_bytes:
+        logger.warning(
+            f"Decode memory safety valve: {active_bytes / 1e9:.2f}GB > "
+            f"{limit_bytes / 1e9:.2f}GB limit. "
+            f"Force-finishing {batch_size} entries to prevent OOM."
+        )
+        prev_token_list = cast(list[int], prev_tokens.tolist())
+        responses: list[Any] = []
+        for e in range(batch_size):
+            cache = batch.extract_cache(e)
+            responses.append(
+                self.Response(
+                    batch.uids[e], prev_token_list[e], prev_logprobs[e], "length", cache
+                )
+            )
+        self.active_batch = None
+        _pending_topk_idx = None
+        _pending_topk_val = None
+        _pending_selected_lps = None
+        self._next_count += 1
+        self._stats.generation_time += time.perf_counter() - tic
+        self._stats.generation_tokens += len(responses)
+        return responses
 
     has_processors = any(p for ps in batch.logits_processors for p in ps)
     if has_processors:
@@ -57,8 +120,6 @@ def _fast_next(self: BatchGenerator) -> list[BatchGenerator.Response]:
     else:
         batch.y = self.sampler(logprobs)
     batch.logprobs = list(logprobs)
-
-    global _pending_topk_idx, _pending_topk_val, _pending_selected_lps
 
     emit_topk_indices: list[list[int]] = (
         cast(list[list[int]], _pending_topk_idx.tolist())
@@ -154,7 +215,7 @@ def _fast_next(self: BatchGenerator) -> list[BatchGenerator.Response]:
             _pending_selected_lps = None
 
     self._next_count += 1
-    if self._next_count % 512 == 0:
+    if _DECODE_SYNC_INTERVAL > 0 and self._next_count % _DECODE_SYNC_INTERVAL == 0:
         mx.synchronize()
         mx.clear_cache()
     self._stats.generation_tokens += len(responses)

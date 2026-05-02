@@ -54,6 +54,7 @@
     modelList: ChatModelInfo[],
     memoryGB: number,
   ): ChatModelInfo | null {
+    void memoryGB;
     for (const tier of AUTO_TIERS) {
       const candidates: ChatModelInfo[] = [];
       for (const baseModel of tier) {
@@ -61,7 +62,6 @@
           .filter(
             (m) =>
               m.base_model === baseModel &&
-              (m.storage_size_megabytes || 0) / 1024 <= memoryGB &&
               (m.storage_size_megabytes || 0) > 0,
           )
           .sort(
@@ -155,14 +155,14 @@
     return (m.storage_size_megabytes || 0) / 1024;
   }
 
-  function fitsInMemory(m: ChatModelInfo): boolean {
-    return getModelSizeGB(m) <= totalMemoryGB && getModelSizeGB(m) > 0;
+  function isSelectableModel(m: ChatModelInfo): boolean {
+    return getModelSizeGB(m) > 0;
   }
 
-  /** For a given base_model name, find the biggest quant variant that fits in memory. */
+  /** For a given base_model name, find the biggest selectable quant variant. */
   function pickBestVariant(baseModel: string): ChatModelInfo | null {
     const variants = models
-      .filter((m) => m.base_model === baseModel && fitsInMemory(m))
+      .filter((m) => m.base_model === baseModel && isSelectableModel(m))
       .sort((a, b) => getModelSizeGB(b) - getModelSizeGB(a));
     return variants[0] ?? null;
   }
@@ -176,10 +176,10 @@
     return null;
   }
 
-  /** Pick the single biggest model that fits. */
+  /** Pick the single biggest selectable model. */
   function pickBiggest(): ChatModelInfo | null {
     const fitting = models
-      .filter((m) => fitsInMemory(m))
+      .filter((m) => isSelectableModel(m))
       .sort((a, b) => getModelSizeGB(b) - getModelSizeGB(a));
     return fitting[0] ?? null;
   }

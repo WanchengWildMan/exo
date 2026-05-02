@@ -32,7 +32,7 @@ EXO_ENV=(
 	EXO_SKIP_PLACEMENT_MEMORY_CHECK=1
 	EXO_MEMORY_THRESHOLD=0.95
 	EXO_PREFILL_MIN_AVAILABLE_GB=0.5
-	EXO_PREFILL_SYNC_TIMEOUT=60
+	EXO_PREFILL_SYNC_HEARTBEAT=30
 	EXO_SKILLS_DESC_MAX_CHARS=30
 	EXO_MAX_SYSTEM_PROMPT_CHARS=2000
 	EXO_DISABLE_JACCL=1
@@ -78,7 +78,8 @@ start_bg() {
 start_fg() {
 	ensure_api_port_free
 	cd "${ROOT_DIR}"
-	exec env "${EXO_ENV[@]}" uv run exo "$@"
+	# Output to both terminal and log file
+	exec env "${EXO_ENV[@]}" uv run exo "$@" 2>&1 | tee -a "${LOG_FILE}"
 }
 
 stop_bg() {

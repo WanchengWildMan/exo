@@ -1,3 +1,8 @@
+P0. Stabilize dual-16GB runtime first: prioritize survival over throughput.
+	- Lower prefill pressure defaults on both nodes to avoid macOS-wide freeze/shutdown.
+	- Reject duplicate startup when port 52415 is already bound instead of cascading into mixed state.
+	- Revisit token-to-disk / offload only after safe steady-state is verified.
+
 3. Task cancellation. When API http request gets cancelled, it should cancel corresponding task.
 4. I'd like to see profiled network latency / bandwidth.
 5. I'd like to see how much bandwidth each link is using.

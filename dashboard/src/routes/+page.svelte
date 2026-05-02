@@ -568,7 +568,7 @@
   const onboardingModels = $derived.by(() => {
     if (models.length === 0) return [];
     const sorted = [...models]
-      .filter((m) => hasEnoughMemory(m) && getModelSizeGB(m) > 0)
+      .filter((m) => getModelSizeGB(m) > 0)
       .sort((a, b) => getModelSizeGB(b) - getModelSizeGB(a));
     if (sorted.length <= 6) return sorted;
 
@@ -4666,7 +4666,7 @@
         existingModelIds={new Set(models.map((m) => m.id))}
         canModelFit={(modelId) => {
           const model = models.find((m) => m.id === modelId);
-          return model ? hasEnoughMemory(model) : false;
+          return model ? getModelSizeGB(model) > 0 : false;
         }}
         getModelFitStatus={(modelId): ModelMemoryFitStatus => {
           const model = models.find((m) => m.id === modelId);
@@ -6737,7 +6737,7 @@
     existingModelIds={new Set(models.map((m) => m.id))}
     canModelFit={(modelId) => {
       const model = models.find((m) => m.id === modelId);
-      return model ? hasEnoughMemory(model) : false;
+      return model ? getModelSizeGB(model) > 0 : false;
     }}
     getModelFitStatus={(modelId): ModelMemoryFitStatus => {
       const model = models.find((m) => m.id === modelId);

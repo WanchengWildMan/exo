@@ -212,7 +212,7 @@ class PrefillSyncTimeout(BaseException):
     """Raised when a distributed sync during prefill exceeds the timeout."""
 
 
-_PREFILL_SYNC_TIMEOUT: float = float(os.getenv("EXO_PREFILL_SYNC_TIMEOUT", "60"))
+_PREFILL_SYNC_HEARTBEAT_INTERVAL: float = float(os.getenv("EXO_PREFILL_SYNC_HEARTBEAT", "30"))
 
 
 def _run_prefill_sync(
@@ -221,32 +221,53 @@ def _run_prefill_sync(
     rank: int,
     phase: str,
 ) -> None:
+    """Synchronize both ranks at a prefill pipeline phase.
+
+    IMPORTANT: The callback is called **directly** (blocking, no thread).
+    Using ThreadPoolExecutor with a timeout previously caused zombie threads
+    that continued participating in MPI collective operations after the main
+    thread raised PrefillSyncTimeout, poisoning the collective ordering for
+    all subsequent operations and making recovery impossible.
+
+    Instead we block indefinitely and rely on:
+      - mx_barrier() before prefill to ensure both ranks start together
+      - libp2p peer-disconnect detection for crash recovery
+      - task cancellation via master for external timeout control
+    A heartbeat log is emitted every EXO_PREFILL_SYNC_HEARTBEAT seconds so
+    the user knows the rank is still waiting.
+    """
     if callback is None:
         return
 
-    logger.info(f"[R{rank}] Waiting for distributed prefill sync: {phase}")
+    logger.debug(f"[R{rank}] Waiting for distributed prefill sync: {phase}")
     started_at = time.perf_counter()
 
-    if _PREFILL_SYNC_TIMEOUT <= 0:
+    # Run the callback in a separate thread ONLY for heartbeat logging.
+    # We never raise a timeout — the thread always runs to completion.
+    import threading
+
+    done_event = threading.Event()
+
+    def _heartbeat_watcher() -> None:
+        interval = _PREFILL_SYNC_HEARTBEAT_INTERVAL
+        while not done_event.wait(timeout=interval):
+            elapsed_s = time.perf_counter() - started_at
+            logger.warning(
+                f"[R{rank}] Still waiting for prefill sync: {phase} "
+                f"({elapsed_s:.0f}s elapsed). Other rank may be slow or disconnected."
+            )
+
+    watcher = threading.Thread(target=_heartbeat_watcher, daemon=True)
+    watcher.start()
+    try:
         callback()
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-        from concurrent.futures import TimeoutError as FuturesTimeoutError
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(callback)
-            try:
-                future.result(timeout=_PREFILL_SYNC_TIMEOUT)
-            except FuturesTimeoutError:
-                elapsed_s = time.perf_counter() - started_at
-                msg = (
-                    f"[R{rank}] Distributed prefill sync timed out after {elapsed_s:.1f}s "
-                    f"during {phase}. The other rank likely crashed or lost connection."
-                )
-                logger.error(msg)
-                raise PrefillSyncTimeout(msg) from None
+    finally:
+        done_event.set()
+        watcher.join(timeout=2)
 
     elapsed_ms = (time.perf_counter() - started_at) * 1000
-    logger.info(
+    log_fn = logger.info if elapsed_ms > 1000 else logger.debug
+    log_fn(
         f"[R{rank}] Distributed prefill sync complete: {phase} ({elapsed_ms:.1f}ms)"
     )
 
@@ -338,9 +359,19 @@ def pipeline_parallel_prefill(
 
             for i in range(n_real):
                 chunk_size = real_chunk_sizes[i]
+                _t_model = time.perf_counter()
+                logger.debug(
+                    f"[R{rank}] real_chunk {i + 1}/{n_real}: calling model() "
+                    f"on {chunk_size} tokens (processed={processed})"
+                )
                 model(
                     prompt[processed : processed + chunk_size][None],
                     cache=_prompt_cache,
+                )
+                _dt_model = (time.perf_counter() - _t_model) * 1000
+                logger.debug(
+                    f"[R{rank}] real_chunk {i + 1}/{n_real}: model() returned "
+                    f"in {_dt_model:.1f}ms"
                 )
                 quantize_cache_fn(_prompt_cache)
                 processed += chunk_size
@@ -589,7 +620,12 @@ def prefill(
     def progress_callback(processed: int, total: int) -> None:
         elapsed = time.perf_counter() - start_time
         tok_per_sec = processed / elapsed if elapsed > 0 else 0
-        logger.info(
+        # Log at info level only at ~10% intervals and completion, debug otherwise
+        pct = processed * 100 // total if total > 0 else 0
+        prev_pct = (processed - 1) * 100 // total if total > 0 and processed > 1 else -1
+        is_milestone = processed == total or (pct // 10 != prev_pct // 10)
+        log_fn = logger.info if is_milestone else logger.debug
+        log_fn(
             f"Prefill progress: {processed}/{total} tokens ({tok_per_sec:.1f} tok/s)"
         )
         _check_memory_during_prefill(_prefill_step_counter[0], processed, total)

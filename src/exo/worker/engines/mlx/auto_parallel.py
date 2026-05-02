@@ -161,11 +161,21 @@ class PipelineFirstLayer(CustomMlxLayer):
 
     def __call__(self, x: mx.array, *args: object, **kwargs: object) -> mx.array:
         if self.r != 0:
+            import time as _time
             # We want to avoid GPU timeout errors by evalling the distributed operation
             # so that it stays on CPU, which does not have a timeout.
+            _t0 = _time.perf_counter()
             mx.eval(x)
+            _dt_pre = (_time.perf_counter() - _t0) * 1000
+            _t1 = _time.perf_counter()
             x = mx.distributed.recv_like(x, (self.r - 1), group=self.group)
             mx.eval(x)
+            _dt_recv = (_time.perf_counter() - _t1) * 1000
+            if _dt_recv > 100:  # Only log if > 100ms
+                logger.info(
+                    f"[PipelineFirstLayer R{self.r}] pre_eval={_dt_pre:.1f}ms "
+                    f"recv+eval={_dt_recv:.1f}ms"
+                )
         return self.original_layer(x, *args, **kwargs)
 
 
@@ -186,15 +196,26 @@ class PipelineLastLayer(CustomMlxLayer):
         self.queue_sends: bool = False
 
     def __call__(self, x: mx.array, *args: object, **kwargs: object) -> mx.array:
+        import time as _time
+
         cache = self.original_layer_signature.bind_partial(
             x, *args, **kwargs
         ).arguments.get("cache", None)
 
+        _t0 = _time.perf_counter()
         output: mx.array = self.original_layer(x, *args, **kwargs)
+        _dt_layer = (_time.perf_counter() - _t0) * 1000
 
         # Eval layer output to materialize it before send — this splits the graph
         # so the send is isolated and the receiving rank's recv can complete.
+        _t1 = _time.perf_counter()
         mx.eval(output)
+        _dt_eval = (_time.perf_counter() - _t1) * 1000
+        if _dt_eval > 100:  # Only log if > 100ms
+            logger.info(
+                f"[PipelineLastLayer R{self.r}] layer={_dt_layer:.1f}ms "
+                f"eval={_dt_eval:.1f}ms shape={list(output.shape)}"
+            )
 
         if self.r != self.s - 1:
             if self.queue_sends:

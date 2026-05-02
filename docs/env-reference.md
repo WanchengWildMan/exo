@@ -36,7 +36,7 @@
 | `EXO_PREFILL_MEMORY_THRESHOLD` | `0.92` | Prefill 过程中内存使用率超过此值时，**中止 prefill** 并返回错误，防止 OOM。范围 0.0–1.0。 | `generate.py` |
 | `EXO_PREFILL_MEMORY_CHECK_INTERVAL` | `8` | 每隔 N 个 prefill step 检查一次内存（并打印日志）。调小可更早发现 OOM 风险。 | `generate.py` |
 | `EXO_PREFILL_MAX_METAL_GB` | `0`（自动=总内存-1.5GB） | Metal GPU 内存预填充上限（GB）。超过此值触发 OOM 中止。`0` 表示自动计算。 | `generate.py` |
-| `EXO_PREFILL_SYNC_TIMEOUT` | `60` | Pipeline 并行 prefill 时，单次分布式 sync（`all_sum`/`all_gather`）的超时秒数。超时后抛出 `PrefillSyncTimeout` 终止 prefill，防止对端崩溃后本端无限阻塞。设为 `0` 禁用。 | `generate.py` |
+| `EXO_PREFILL_SYNC_HEARTBEAT` | `30` | Pipeline 并行 prefill 等待对端时的心跳日志间隔（秒）。不再使用超时机制，因为 ThreadPoolExecutor 超时会产生僵尸线程，毒化 MPI 集合操作顺序，导致后续所有同步失败。现在依赖 mx_barrier 同步 + libp2p 断连检测 + master 任务取消。 | `generate.py` |
 | `EXO_SKIP_WARMUP` | `1`（跳过） | 设为 `0` 恢复启动时的推理预热（默认已跳过）。 | `generate.py` |
 | `EXO_GENERATION_MEMORY_CHECK_INTERVAL` | `64` | 生成阶段每隔 N 步检查 Metal 内存并记录日志。 | `batch_generate.py` |
 
@@ -51,8 +51,10 @@
 | `EXO_STRIP_SKILLS_BLOCK` | 空（关） | 设为 `1` 时，从 system prompt 中完整剥除 `<available_skills>…</available_skills>` 块。 | `adapters/chat_completions.py` |
 | `EXO_SKILLS_DESC_MAX_CHARS` | 空（不裁剪） | 保留 skills 块结构，但每条技能描述超过 N 字符时截断。例如 `60`。与 `EXO_STRIP_SKILLS_BLOCK` 互斥（后者优先）。 | `adapters/chat_completions.py` |
 | `EXO_MAX_SYSTEM_PROMPT_CHARS` | 空（不裁剪） | System prompt 总字符超过 N 时截断并加 `[trimmed]` 标记。兜底保险，在上面两个开关之后执行。 | `adapters/chat_completions.py` |
+| `EXO_OPENCLAW_SKILLS_DESC_MAX_CHARS` | `30` | 仅当请求 system prompt 呈现 OpenClaw 特征，且未显式配置上面两个全局裁剪开关时生效。会逐个 `<skill>` 重写成紧凑结构，并将描述压短到指定长度。 | `adapters/chat_completions.py` |
+| `EXO_OPENCLAW_MAX_SYSTEM_PROMPT_CHARS` | `3000` | 仅当请求 system prompt 呈现 OpenClaw 特征，且未显式配置 `EXO_MAX_SYSTEM_PROMPT_CHARS` 时生效。用于恢复 OpenClaw 默认 3k 总长裁剪。 | `adapters/chat_completions.py` |
 
-**优先级**：`STRIP_SKILLS_BLOCK` > `SKILLS_DESC_MAX_CHARS`，两者之后再执行 `MAX_SYSTEM_PROMPT_CHARS`。
+**优先级**：显式全局配置优先，即 `STRIP_SKILLS_BLOCK` > `SKILLS_DESC_MAX_CHARS`，两者之后再执行 `MAX_SYSTEM_PROMPT_CHARS`。如果这些全局开关都未设置，且 system prompt 呈现 OpenClaw 特征，则自动退回到 OpenClaw 默认档：`SKILLS_DESC_MAX_CHARS=30`、`MAX_SYSTEM_PROMPT_CHARS=3000`。
 
 ---
 

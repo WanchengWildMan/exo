@@ -286,18 +286,18 @@ class SequentialGenerator(InferenceGenerator):
                 )
 
         def distributed_prompt_progress_callback() -> None:
-            logger.info(
+            logger.debug(
                 f"[R{self.device_rank}] Prefill sync: checking cancellations for task {task.task_id}"
             )
             self.agree_on_cancellations()
             if self.should_cancel(task.task_id):
                 raise PrefillCancelled()
 
-            logger.info(
+            logger.debug(
                 f"[R{self.device_rank}] Prefill sync: agreeing task queue for task {task.task_id}"
             )
             self.agree_on_tasks()
-            logger.info(
+            logger.debug(
                 f"[R{self.device_rank}] Prefill sync: collective callbacks finished for task {task.task_id}"
             )
 
@@ -531,18 +531,18 @@ class BatchGenerator(InferenceGenerator):
                 )
 
         def distributed_prompt_progress_callback() -> None:
-            logger.info(
+            logger.debug(
                 f"[R{self.device_rank}] Prefill sync: checking cancellations for task {task.task_id}"
             )
             self.agree_on_cancellations()
             if self.should_cancel(task.task_id):
                 raise PrefillCancelled()
 
-            logger.info(
+            logger.debug(
                 f"[R{self.device_rank}] Prefill sync: agreeing task queue for task {task.task_id}"
             )
             self.agree_on_tasks()
-            logger.info(
+            logger.debug(
                 f"[R{self.device_rank}] Prefill sync: collective callbacks finished for task {task.task_id}"
             )
 
